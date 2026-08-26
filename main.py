@@ -4,12 +4,12 @@ import numpy as np
 import requests
 import hashlib
 import json
-from io import StringIO
 from datetime import datetime, timedelta
+from io import StringIO
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -39,14 +39,73 @@ IIFL_LOGIN_URL = (
     "?v=1&appkey=iDCmottF6T8VZr1"
 )
 
-IIFL_NSE_CONTRACT_URL = (
+IIFL_NSE_JSON_URL = (
+    "https://api.iiflcapital.com/"
+    "v1/contractfiles/NSEEQ.json"
+)
+
+IIFL_NSE_CSV_URL = (
     "https://api.iiflcapital.com/"
     "v1/contractfiles/NSEEQ.csv"
 )
 
 
 # ============================================================
-# IIFL LOGIN
+# NSE STOCK LIST
+# ============================================================
+
+NSE_STOCKS = [
+
+    "RELIANCE.NS",
+    "TCS.NS",
+    "HDFCBANK.NS",
+    "ICICIBANK.NS",
+    "INFY.NS",
+    "ITC.NS",
+    "SBIN.NS",
+    "BHARTIARTL.NS",
+    "LT.NS",
+    "AXISBANK.NS",
+    "KOTAKBANK.NS",
+    "HINDUNILVR.NS",
+    "MARUTI.NS",
+    "SUNPHARMA.NS",
+    "TITAN.NS",
+    "BAJFINANCE.NS",
+    "BAJAJFINSV.NS",
+    "ADANIENT.NS",
+    "ADANIPORTS.NS",
+    "NTPC.NS",
+    "POWERGRID.NS",
+    "BEL.NS",
+    "HAL.NS",
+    "BHEL.NS",
+    "TRENT.NS",
+    "DIXON.NS",
+    "CDSL.NS",
+    "MCX.NS",
+    "POLYCAB.NS",
+    "PERSISTENT.NS",
+    "COFORGE.NS",
+    "JUBLFOOD.NS",
+    "PIDILITIND.NS",
+    "DEEPAKNTR.NS",
+    "SRF.NS",
+    "TATAELXSI.NS",
+    "MUTHOOTFIN.NS",
+    "SHRIRAMFIN.NS",
+    "AUROPHARMA.NS",
+    "DRREDDY.NS",
+    "CIPLA.NS",
+    "DIVISLAB.NS",
+    "LUPIN.NS",
+    "ZYDUSLIFE.NS"
+
+]
+
+
+# ============================================================
+# IIFL LOGIN / USER SESSION
 # ============================================================
 
 def get_iifl_user_session(
@@ -56,14 +115,23 @@ def get_iifl_user_session(
 
     try:
 
-        # Get API secret from Streamlit Secrets
         app_secret = st.secrets[
             "IIFL_APP_SECRET"
         ]
 
+    except Exception:
+
+        st.error(
+            "IIFL_APP_SECRET is missing "
+            "from Streamlit Secrets."
+        )
+
+        return None
+
+    try:
+
         # ----------------------------------------------------
-        # IIFL CHECKSUM
-        # SHA256(clientId + authCode + API Secret)
+        # IIFL checksum
         # ----------------------------------------------------
 
         checksum_string = (
@@ -77,26 +145,25 @@ def get_iifl_user_session(
         ).hexdigest()
 
         # ----------------------------------------------------
-        # GET USER SESSION
+        # User session request
         # ----------------------------------------------------
 
         response = requests.post(
+
             f"{IIFL_BASE_URL}/getusersession",
+
             json={
                 "checkSum": checksum
             },
+
             timeout=30
         )
 
         if response.status_code != 200:
 
             st.error(
-                f"IIFL authentication HTTP error: "
+                "IIFL login HTTP error: "
                 f"{response.status_code}"
-            )
-
-            st.code(
-                response.text
             )
 
             return None
@@ -105,28 +172,32 @@ def get_iifl_user_session(
 
         if data.get("status") == "Ok":
 
-            user_session = (
-                data.get("userSession")
+            session = data.get(
+                "userSession"
             )
 
-            if user_session:
+            if session:
 
-                return user_session
-
-        st.error(
-            "IIFL authentication failed."
-        )
-
-        st.json(data)
-
-        return None
-
-    except KeyError:
+                return session
 
         st.error(
-            "IIFL_APP_SECRET is missing "
-            "from Streamlit Secrets."
+            "IIFL did not return a user session."
         )
+
+        # Don't display sensitive values
+        safe_data = dict(data)
+
+        for key in [
+            "userSession",
+            "accessToken",
+            "token"
+        ]:
+
+            if key in safe_data:
+
+                safe_data[key] = "***HIDDEN***"
+
+        st.json(safe_data)
 
         return None
 
@@ -140,7 +211,7 @@ def get_iifl_user_session(
 
 
 # ============================================================
-# READ IIFL REDIRECT
+# PROCESS REDIRECT
 # ============================================================
 
 query_params = st.query_params
@@ -149,178 +220,411 @@ authcode = query_params.get(
     "authcode"
 )
 
+if authcode is None:
+
+    authcode = query_params.get(
+        "authCode"
+    )
+
 clientid = query_params.get(
     "clientid"
 )
 
+if clientid is None:
 
-if authcode and clientid:
+    clientid = query_params.get(
+        "clientId"
+    )
 
-    # --------------------------------------------------------
-    # Generate session only if one doesn't already exist
-    # --------------------------------------------------------
 
-    if (
-        "iifl_user_session"
-        not in st.session_state
+if (
+    authcode
+    and clientid
+    and "iifl_user_session"
+    not in st.session_state
+):
+
+    with st.spinner(
+        "🔐 Connecting to IIFL..."
     ):
 
-        with st.spinner(
-            "🔐 Connecting to IIFL..."
-        ):
-
-            user_session = (
-                get_iifl_user_session(
-                    authcode,
-                    clientid
-                )
+        user_session = (
+            get_iifl_user_session(
+                authcode,
+                clientid
             )
+        )
 
-        if user_session:
+    if user_session:
 
-            st.session_state[
-                "iifl_user_session"
-            ] = user_session
+        st.session_state[
+            "iifl_user_session"
+        ] = user_session
 
-            st.session_state[
-                "iifl_client_id"
-            ] = clientid
+        st.session_state[
+            "iifl_client_id"
+        ] = clientid
 
-            st.success(
-                "🟢 IIFL Connected Successfully"
-            )
+        st.session_state[
+            "iifl_connected"
+        ] = True
 
-            # Remove authcode/clientid
-            # from browser URL
+        st.query_params.clear()
 
-            st.query_params.clear()
-
-            st.rerun()
+        st.rerun()
 
 
 # ============================================================
-# IIFL AUTHORIZATION HEADERS
+# IIFL HEADERS
 # ============================================================
 
 def get_iifl_headers():
 
-    if (
-        "iifl_user_session"
-        not in st.session_state
-    ):
+    session = (
+        st.session_state.get(
+            "iifl_user_session"
+        )
+    )
+
+    if not session:
 
         return None
 
     return {
 
-        "Authorization": (
-            "Bearer "
-            + st.session_state[
-                "iifl_user_session"
-            ]
-        ),
+        "Authorization":
+            f"Bearer {session}",
 
         "Content-Type":
+            "application/json",
+
+        "Accept":
             "application/json"
+
     }
 
 
 # ============================================================
-# IIFL NSE INSTRUMENT MASTER
+# LOAD IIFL NSE INSTRUMENT MASTER
 # ============================================================
 
 @st.cache_data(ttl=86400)
 def load_iifl_nse_instruments():
 
+    # ========================================================
+    # METHOD 1: JSON
+    # ========================================================
+
     try:
 
         response = requests.get(
-            IIFL_NSE_CONTRACT_URL,
+            IIFL_NSE_JSON_URL,
             timeout=30
         )
 
-        response.raise_for_status()
+        if response.status_code == 200:
 
-        # ----------------------------------------------------
-        # CSV
-        # ----------------------------------------------------
+            raw = response.json()
 
-        df = pd.read_csv(
-            StringIO(
-                response.text
+            # ------------------------------------------------
+            # JSON may be:
+            #
+            # list
+            # OR
+            # {"result": [...]}
+            # OR
+            # {"data": [...]}
+            # ------------------------------------------------
+
+            if isinstance(
+                raw,
+                list
+            ):
+
+                records = raw
+
+            elif isinstance(
+                raw,
+                dict
+            ):
+
+                records = None
+
+                for key in [
+                    "result",
+                    "data",
+                    "instruments",
+                    "records"
+                ]:
+
+                    if key in raw:
+
+                        if isinstance(
+                            raw[key],
+                            list
+                        ):
+
+                            records = raw[key]
+
+                            break
+
+                # Sometimes result itself is a dict
+                if records is None:
+
+                    for value in raw.values():
+
+                        if isinstance(
+                            value,
+                            list
+                        ):
+
+                            records = value
+
+                            break
+
+            else:
+
+                records = None
+
+            if records:
+
+                df = pd.DataFrame(
+                    records
+                )
+
+                if not df.empty:
+
+                    return df
+
+    except Exception:
+        pass
+
+
+    # ========================================================
+    # METHOD 2: CSV FALLBACK
+    # ========================================================
+
+    try:
+
+        response = requests.get(
+            IIFL_NSE_CSV_URL,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+
+            df = pd.read_csv(
+                StringIO(
+                    response.text
+                )
             )
-        )
 
-        if df.empty:
+            if not df.empty:
 
-            return None
+                return df
 
-        return df
+    except Exception:
+        pass
 
-    except Exception as e:
 
-        st.error(
-            "Unable to download IIFL NSE "
-            f"instrument master: {e}"
-        )
+    return None
+
+
+# ============================================================
+# NORMALIZE SYMBOL
+# ============================================================
+
+def normalize_symbol(
+    symbol
+):
+
+    symbol = str(
+        symbol
+    ).upper().strip()
+
+    symbol = (
+        symbol
+        .replace(".NS", "")
+        .replace(".NSE", "")
+        .replace("-EQ", "")
+        .replace("_EQ", "")
+        .replace(" EQ", "")
+        .strip()
+    )
+
+    return symbol
+
+
+# ============================================================
+# FIND INSTRUMENT ID IN RECORD
+# ============================================================
+
+def find_instrument_id(
+    record
+):
+
+    if not isinstance(
+        record,
+        dict
+    ):
 
         return None
 
+    # Exact common names
+    possible_keys = [
 
-# ============================================================
-# FIND COLUMN
-# ============================================================
+        "instrumentId",
+        "InstrumentId",
+        "instrumentID",
+        "InstrumentID",
 
-def find_column(
-    columns,
-    candidates
-):
+        "instrument_id",
+        "Instrument_Id",
 
-    lower_columns = {
-        str(col).lower().replace(
-            "_", ""
-        ).replace(
-            " ", ""
-        ): col
-        for col in columns
-    }
+        "NSEInstrumentId",
+        "nseInstrumentId",
 
-    for candidate in candidates:
+        "securityId",
+        "SecurityId",
 
-        key = (
-            candidate.lower()
-            .replace("_", "")
-            .replace(" ", "")
-        )
+        "scripCode",
+        "ScripCode",
 
-        if key in lower_columns:
+        "token",
+        "Token"
 
-            return lower_columns[key]
+    ]
 
-    # Partial matching
-    for col in columns:
+    for key in possible_keys:
 
-        normalized = (
-            str(col)
+        if key in record:
+
+            value = record[key]
+
+            if (
+                value is not None
+                and str(value).strip()
+                not in [
+                    "",
+                    "nan",
+                    "None"
+                ]
+            ):
+
+                return str(
+                    value
+                )
+
+    # --------------------------------------------------------
+    # Case-insensitive search
+    # --------------------------------------------------------
+
+    for key, value in record.items():
+
+        key_clean = (
+            str(key)
             .lower()
             .replace("_", "")
             .replace(" ", "")
         )
 
-        for candidate in candidates:
+        if (
+            "instrumentid"
+            in key_clean
+        ):
 
-            candidate_normalized = (
-                candidate.lower()
-                .replace("_", "")
-                .replace(" ", "")
-            )
+            if value is not None:
 
-            if (
-                candidate_normalized
-                in normalized
+                return str(
+                    value
+                )
+
+    return None
+
+
+# ============================================================
+# RECURSIVE SEARCH
+# ============================================================
+
+def recursive_find_symbol(
+    obj,
+    target
+):
+
+    target = normalize_symbol(
+        target
+    )
+
+    # ========================================================
+    # DICTIONARY
+    # ========================================================
+
+    if isinstance(
+        obj,
+        dict
+    ):
+
+        # First look at the complete record
+        # and determine whether target exists.
+
+        for key, value in obj.items():
+
+            if isinstance(
+                value,
+                (str, int, float)
             ):
 
-                return col
+                cleaned = normalize_symbol(
+                    value
+                )
+
+                if cleaned == target:
+
+                    return obj
+
+                if cleaned == (
+                    target + "-EQ"
+                ):
+
+                    return obj
+
+        # Recursively search nested structures
+        for value in obj.values():
+
+            found = recursive_find_symbol(
+                value,
+                target
+            )
+
+            if found is not None:
+
+                return found
+
+        return None
+
+
+    # ========================================================
+    # LIST
+    # ========================================================
+
+    if isinstance(
+        obj,
+        list
+    ):
+
+        for item in obj:
+
+            found = recursive_find_symbol(
+                item,
+                target
+            )
+
+            if found is not None:
+
+                return found
+
+        return None
+
 
     return None
 
@@ -339,102 +643,141 @@ def find_iifl_instrument(
 
     if instruments is None:
 
-        return None
-
-    clean_symbol = (
-        symbol
-        .replace(".NS", "")
-        .replace("-EQ", "")
-        .upper()
-        .strip()
-    )
-
-    # --------------------------------------------------------
-    # Find trading symbol column
-    # --------------------------------------------------------
-
-    symbol_column = find_column(
-        instruments.columns,
-        [
-            "TradingSymbol",
-            "tradingSymbol",
-            "Symbol",
-            "symbol",
-            "NSETradingSymbol",
-            "nseTradingSymbol"
-        ]
-    )
-
-    if symbol_column is None:
-
         st.error(
-            "Could not identify the trading "
-            "symbol column in IIFL instrument master."
-        )
-
-        st.write(
-            "Columns received from IIFL:"
-        )
-
-        st.write(
-            list(instruments.columns)
-        )
-
-        st.dataframe(
-            instruments.head(10),
-            use_container_width=True
+            "❌ IIFL NSE instrument master "
+            "could not be downloaded."
         )
 
         return None
 
-    # --------------------------------------------------------
-    # Normalize trading symbols
-    # --------------------------------------------------------
-
-    values = (
-        instruments[
-            symbol_column
-        ]
-        .astype(str)
-        .str.upper()
-        .str.strip()
+    target = normalize_symbol(
+        symbol
     )
 
-    # Exact symbol
-    matches = instruments[
-        values == clean_symbol
-    ]
+    # ========================================================
+    # METHOD 1 — DATAFRAME SEARCH
+    # ========================================================
 
-    # SYMBOL-EQ
-    if matches.empty:
+    # Search every column instead of assuming
+    # TradingSymbol/Symbol.
 
-        matches = instruments[
-            values ==
-            f"{clean_symbol}-EQ"
-        ]
+    for column in instruments.columns:
 
-    # SYMBOL_EQ
-    if matches.empty:
+        try:
 
-        matches = instruments[
-            values ==
-            f"{clean_symbol}_EQ"
-        ]
-
-    # Starts with symbol
-    if matches.empty:
-
-        matches = instruments[
-            values.str.startswith(
-                clean_symbol
+            values = (
+                instruments[
+                    column
+                ]
+                .astype(str)
+                .str.upper()
+                .str.strip()
             )
-        ]
 
-    if matches.empty:
+            normalized_values = (
+                values
+                .str.replace(
+                    ".NS",
+                    "",
+                    regex=False
+                )
+                .str.replace(
+                    "-EQ",
+                    "",
+                    regex=False
+                )
+                .str.replace(
+                    "_EQ",
+                    "",
+                    regex=False
+                )
+                .str.replace(
+                    " EQ",
+                    "",
+                    regex=False
+                )
+                .str.strip()
+            )
 
-        return None
+            match = instruments[
+                normalized_values
+                == target
+            ]
 
-    return matches.iloc[0]
+            if not match.empty:
+
+                return match.iloc[0]
+
+        except Exception:
+
+            continue
+
+
+    # ========================================================
+    # METHOD 2 — JSON RECURSIVE SEARCH
+    # ========================================================
+
+    try:
+
+        response = requests.get(
+            IIFL_NSE_JSON_URL,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+
+            raw = response.json()
+
+            record = recursive_find_symbol(
+                raw,
+                target
+            )
+
+            if record:
+
+                return pd.Series(
+                    record
+                )
+
+    except Exception:
+        pass
+
+
+    # ========================================================
+    # NOT FOUND
+    # ========================================================
+
+    st.error(
+        f"❌ {target} was not found "
+        "in the IIFL NSE instrument master."
+    )
+
+    # Diagnostic information
+    st.warning(
+        "IIFL instrument master was downloaded, "
+        "but the symbol mapping did not match."
+    )
+
+    st.write(
+        "Instrument-master columns:"
+    )
+
+    st.code(
+        "\n".join(
+            str(c)
+            for c in instruments.columns
+        )
+    )
+
+    st.write(
+        "Number of instruments:"
+    )
+
+    st.write(
+        len(instruments)
+    )
+
+    return None
 
 
 # ============================================================
@@ -453,25 +796,29 @@ def get_instrument_details(
 
         return None
 
-    details = {}
+    if isinstance(
+        row,
+        pd.Series
+    ):
 
-    for column in row.index:
+        details = (
+            row
+            .replace({
+                np.nan: None
+            })
+            .to_dict()
+        )
 
-        value = row[column]
+    elif isinstance(
+        row,
+        dict
+    ):
 
-        try:
+        details = row
 
-            if pd.isna(value):
+    else:
 
-                value = ""
-
-        except Exception:
-
-            pass
-
-        details[
-            str(column)
-        ] = str(value)
+        return None
 
     return details
 
@@ -494,41 +841,19 @@ def get_instrument_id(
 
         return None, None
 
-    # --------------------------------------------------------
-    # Find instrument ID
-    # --------------------------------------------------------
-
-    instrument_id = None
-
-    possible_id_columns = [
-
-        "instrumentId",
-        "InstrumentId",
-        "InstrumentID",
-        "instrumentID",
-        "NSEInstrumentId",
-        "nseInstrumentId"
-
-    ]
-
-    for key in possible_id_columns:
-
-        if key in details:
-
-            instrument_id = (
-                details[key]
-            )
-
-            break
+    instrument_id = (
+        find_instrument_id(
+            details
+        )
+    )
 
     return instrument_id, details
 
 
 # ============================================================
-# IIFL HISTORICAL DATA
+# HISTORICAL DATA
 # ============================================================
 
-@st.cache_data(ttl=900)
 def get_iifl_historical_data(
     instrument_id,
     from_date,
@@ -536,63 +861,58 @@ def get_iifl_historical_data(
     interval="1 day"
 ):
 
-    # --------------------------------------------------------
-    # Authentication check
-    # --------------------------------------------------------
-
-    if (
-        "iifl_user_session"
-        not in st.session_state
-    ):
-
-        return None
-
-    headers = get_iifl_headers()
+    headers = (
+        get_iifl_headers()
+    )
 
     if headers is None:
 
-        return None
+        st.error(
+            "IIFL session is not available."
+        )
 
-    # --------------------------------------------------------
-    # IIFL HISTORICAL ENDPOINT
-    # --------------------------------------------------------
+        return None
 
     url = (
         f"{IIFL_BASE_URL}"
         "/marketdata/historicaldata"
     )
 
-    # --------------------------------------------------------
-    # Request payload
-    # --------------------------------------------------------
-
     payload = {
 
-        "exchange": "NSEEQ",
+        "exchange":
+            "NSEEQ",
 
-        "InstrumentId": str(
-            instrument_id
-        ),
+        "InstrumentId":
+            str(instrument_id),
 
-        "interval": interval,
+        "interval":
+            interval,
 
-        "fromDate": from_date,
+        "fromDate":
+            from_date,
 
-        "toDate": to_date
+        "toDate":
+            to_date
+
     }
 
     try:
 
         response = requests.post(
+
             url,
+
             headers=headers,
+
             json=payload,
+
             timeout=30
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # HTTP ERROR
-        # ----------------------------------------------------
+        # ====================================================
 
         if response.status_code != 200:
 
@@ -607,9 +927,10 @@ def get_iifl_historical_data(
 
             return None
 
-        # ----------------------------------------------------
-        # Parse response
-        # ----------------------------------------------------
+
+        # ====================================================
+        # JSON
+        # ====================================================
 
         try:
 
@@ -617,50 +938,62 @@ def get_iifl_historical_data(
 
         except Exception:
 
-            # IIFL documentation notes that
-            # historical response can be returned
-            # in string format.
+            st.error(
+                "IIFL returned an invalid "
+                "historical-data response."
+            )
 
-            try:
+            st.code(
+                response.text
+            )
 
-                data = json.loads(
-                    response.text
-                )
+            return None
 
-            except Exception:
 
-                st.error(
-                    "Could not decode IIFL "
-                    "historical-data response."
-                )
+        # ====================================================
+        # API STATUS
+        # ====================================================
 
-                st.code(
-                    response.text
-                )
-
-                return None
-
-        # ----------------------------------------------------
-        # Status
-        # ----------------------------------------------------
-
-        if data.get("status") != "Ok":
+        if data.get(
+            "status"
+        ) != "Ok":
 
             st.error(
                 "IIFL historical-data request failed."
             )
 
-            st.json(data)
+            # Hide token-like fields
+            safe_data = dict(
+                data
+            )
+
+            for key in [
+                "userSession",
+                "accessToken",
+                "token"
+            ]:
+
+                if key in safe_data:
+
+                    safe_data[
+                        key
+                    ] = "***HIDDEN***"
+
+            st.json(
+                safe_data
+            )
 
             return None
+
 
         result = data.get(
             "result"
         )
 
-        # ----------------------------------------------------
-        # Result can itself be a JSON string
-        # ----------------------------------------------------
+
+        # ====================================================
+        # RESULT MAY BE STRING
+        # ====================================================
 
         if isinstance(
             result,
@@ -675,125 +1008,210 @@ def get_iifl_historical_data(
 
             except Exception:
 
-                st.error(
-                    "IIFL returned an unexpected "
-                    "historical-data format."
-                )
+                pass
 
-                st.code(
-                    result
-                )
 
-                return None
+        # ====================================================
+        # HANDLE COMMON RESULT WRAPPERS
+        # ====================================================
+
+        if isinstance(
+            result,
+            dict
+        ):
+
+            for key in [
+                "data",
+                "candles",
+                "result",
+                "records"
+            ]:
+
+                if key in result:
+
+                    result = result[
+                        key
+                    ]
+
+                    break
+
 
         if not result:
 
+            st.warning(
+                "IIFL returned no candles."
+            )
+
             return None
 
-        # ----------------------------------------------------
-        # Convert candles
-        #
-        # timestamp
-        # open
-        # high
-        # low
-        # close
-        # volume
-        # ----------------------------------------------------
+
+        # ====================================================
+        # CONVERT CANDLES
+        # ====================================================
 
         rows = []
 
+
         for candle in result:
 
-            if not isinstance(
+            # ------------------------------------------------
+            # LIST FORMAT
+            # ------------------------------------------------
+
+            if isinstance(
                 candle,
                 (list, tuple)
             ):
 
-                continue
+                if len(candle) >= 6:
 
-            if len(candle) < 6:
+                    try:
 
-                continue
+                        rows.append({
 
-            try:
+                            "Date":
+                                candle[0],
 
-                rows.append({
+                            "Open":
+                                float(
+                                    candle[1]
+                                ),
 
-                    "Date":
-                        candle[0],
+                            "High":
+                                float(
+                                    candle[2]
+                                ),
 
-                    "Open":
-                        float(candle[1]),
+                            "Low":
+                                float(
+                                    candle[3]
+                                ),
 
-                    "High":
-                        float(candle[2]),
+                            "Close":
+                                float(
+                                    candle[4]
+                                ),
 
-                    "Low":
-                        float(candle[3]),
+                            "Volume":
+                                float(
+                                    candle[5]
+                                )
 
-                    "Close":
-                        float(candle[4]),
+                        })
 
-                    "Volume":
-                        float(candle[5])
+                    except Exception:
 
-                })
+                        continue
 
-            except Exception:
 
-                continue
+            # ------------------------------------------------
+            # DICTIONARY FORMAT
+            # ------------------------------------------------
 
-        if not rows:
+            elif isinstance(
+                candle,
+                dict
+            ):
 
-            return None
+                def get_value(
+                    keys
+                ):
 
-        df = pd.DataFrame(
-            rows
-        )
+                    for key in keys:
 
-        # ----------------------------------------------------
-        # Convert timestamp
-        # ----------------------------------------------------
+                        if key in candle:
 
-        df["Date"] = pd.to_datetime(
-            df["Date"],
-            errors="coerce"
-        )
+                            return candle[
+                                key
+                            ]
 
-        df = df.dropna(
-            subset=["Date"]
-        )
+                    return None
 
-        df = df.set_index(
-            "Date"
-        )
 
-        # ----------------------------------------------------
-        # Sort oldest → newest
-        # ----------------------------------------------------
+                timestamp = get_value(
+                    [
+                        "timestamp",
+                        "Timestamp",
+                        "time",
+                        "Time",
+                        "date",
+                        "Date"
+                    ]
+                )
 
-        df = df.sort_index()
+                open_price = get_value(
+                    [
+                        "open",
+                        "Open"
+                    ]
+                )
 
-        # ----------------------------------------------------
-        # Remove duplicate candles
-        # ----------------------------------------------------
+                high_price = get_value(
+                    [
+                        "high",
+                        "High"
+                    ]
+                )
 
-        df = df[
-            ~df.index.duplicated(
-                keep="last"
-            )
-        ]
+                low_price = get_value(
+                    [
+                        "low",
+                        "Low"
+                    ]
+                )
 
-        return df[
-            [
-                "Open",
-                "High",
-                "Low",
-                "Close",
-                "Volume"
-            ]
-        ]
+                close_price = get_value(
+                    [
+                        "close",
+                        "Close"
+                    ]
+                )
+
+                volume = get_value(
+                    [
+                        "volume",
+                        "Volume"
+                    ]
+                )
+
+                try:
+
+                    rows.append({
+
+                        "Date":
+                            timestamp,
+
+                        "Open":
+                            float(
+                                open_price
+                            ),
+
+                        "High":
+                            float(
+                                high_price
+                            ),
+
+                        "Low":
+                            float(
+                                low_price
+                            ),
+
+                        "Close":
+                            float(
+                                close_price
+                            ),
+
+                        "Volume":
+                            float(
+                                volume
+                            )
+
+                    })
+
+                except Exception:
+
+                    continue
+
 
     except Exception as e:
 
@@ -804,11 +1222,144 @@ def get_iifl_historical_data(
         return None
 
 
+    # ========================================================
+    # CREATE DATAFRAME
+    # ========================================================
+
+    if not rows:
+
+        st.error(
+            "IIFL response was received, "
+            "but no OHLCV candles could be parsed."
+        )
+
+        return None
+
+
+    df = pd.DataFrame(
+        rows
+    )
+
+
+    # ========================================================
+    # DATE
+    # ========================================================
+
+    df["Date"] = pd.to_datetime(
+        df["Date"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=[
+            "Date"
+        ]
+    )
+
+
+    df = df.set_index(
+        "Date"
+    )
+
+
+    # ========================================================
+    # SORT
+    # ========================================================
+
+    df = df.sort_index()
+
+
+    # ========================================================
+    # REMOVE DUPLICATES
+    # ========================================================
+
+    df = df[
+        ~df.index.duplicated(
+            keep="last"
+        )
+    ]
+
+
+    return df[
+        [
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume"
+        ]
+    ]
+
+
+# ============================================================
+# GET STOCK DATA
+# ============================================================
+
+def get_stock_iifl_data(
+    symbol
+):
+
+    instrument_id, details = (
+        get_instrument_id(
+            symbol
+        )
+    )
+
+    if instrument_id is None:
+
+        return None, None, details
+
+
+    end_date = datetime.now()
+
+    start_date = (
+        end_date
+        - timedelta(
+            days=365
+        )
+    )
+
+
+    from_date = (
+        start_date.strftime(
+            "%d-%b-%Y"
+        )
+    )
+
+    to_date = (
+        end_date.strftime(
+            "%d-%b-%Y"
+        )
+    )
+
+
+    df = get_iifl_historical_data(
+
+        instrument_id,
+
+        from_date,
+
+        to_date,
+
+        "1 day"
+
+    )
+
+
+    return (
+        df,
+        instrument_id,
+        details
+    )
+
+
 # ============================================================
 # VCP ANALYSIS
 # ============================================================
 
-def analyze_vcp(df):
+def analyze_vcp(
+    df
+):
 
     if (
         df is None
@@ -817,50 +1368,70 @@ def analyze_vcp(df):
 
         return None
 
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    volume = df["Volume"]
 
-    # --------------------------------------------------------
+    close = df[
+        "Close"
+    ]
+
+    volume = df[
+        "Volume"
+    ]
+
+
+    # ========================================================
     # MOVING AVERAGES
-    # --------------------------------------------------------
+    # ========================================================
 
-    ma50 = close.rolling(
-        50
-    ).mean()
+    ma50 = (
+        close.rolling(
+            50
+        ).mean()
+    )
 
-    ma150 = close.rolling(
-        150
-    ).mean()
+    ma150 = (
+        close.rolling(
+            150
+        ).mean()
+    )
 
-    ma200 = close.rolling(
-        200
-    ).mean()
+    ma200 = (
+        close.rolling(
+            200
+        ).mean()
+    )
+
 
     current_price = float(
         close.iloc[-1]
     )
 
-    # --------------------------------------------------------
-    # TREND
-    # --------------------------------------------------------
+
+    # ========================================================
+    # TREND SCORE
+    # ========================================================
 
     trend_score = 0
 
+
     if (
         current_price
-        > float(ma50.iloc[-1])
+        > float(
+            ma50.iloc[-1]
+        )
     ):
 
         trend_score += 1
 
+
     if (
         current_price
-        > float(ma150.iloc[-1])
+        > float(
+            ma150.iloc[-1]
+        )
     ):
 
         trend_score += 1
+
 
     if len(
         ma200.dropna()
@@ -868,10 +1439,13 @@ def analyze_vcp(df):
 
         if (
             current_price
-            > float(ma200.iloc[-1])
+            > float(
+                ma200.iloc[-1]
+            )
         ):
 
             trend_score += 1
+
 
     if (
         ma50.iloc[-1]
@@ -879,6 +1453,7 @@ def analyze_vcp(df):
     ):
 
         trend_score += 1
+
 
     if len(
         ma200.dropna()
@@ -891,18 +1466,23 @@ def analyze_vcp(df):
 
             trend_score += 1
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # PRIOR ADVANCE
-    # --------------------------------------------------------
+    # ========================================================
 
     lookback = min(
         120,
         len(close) - 1
     )
 
+
     old_price = float(
-        close.iloc[-lookback]
+        close.iloc[
+            -lookback
+        ]
     )
+
 
     prior_gain = (
         (
@@ -911,21 +1491,29 @@ def analyze_vcp(df):
         ) - 1
     ) * 100
 
-    # --------------------------------------------------------
-    # RECENT CONSOLIDATION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # CONSOLIDATION
+    # ========================================================
 
     recent = df.tail(
         40
     )
 
+
     recent_high = float(
-        recent["High"].max()
+        recent[
+            "High"
+        ].max()
     )
 
+
     recent_low = float(
-        recent["Low"].min()
+        recent[
+            "Low"
+        ].min()
     )
+
 
     consolidation_range = (
         (
@@ -935,36 +1523,53 @@ def analyze_vcp(df):
         / recent_high
     ) * 100
 
-    # --------------------------------------------------------
-    # VOLATILITY CONTRACTION
-    # --------------------------------------------------------
 
-    returns = close.pct_change()
+    # ========================================================
+    # VOLATILITY
+    # ========================================================
+
+    returns = (
+        close.pct_change()
+    )
+
 
     volatility_20 = (
-        returns.tail(20).std()
+        returns
+        .tail(20)
+        .std()
     )
 
+
     volatility_60 = (
-        returns.tail(60).std()
+        returns
+        .tail(60)
+        .std()
     )
+
 
     volatility_contracting = (
         volatility_20
         < volatility_60
     )
 
-    # --------------------------------------------------------
-    # VOLUME CONTRACTION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # VOLUME
+    # ========================================================
 
     volume_10 = float(
-        volume.tail(10).mean()
+        volume
+        .tail(10)
+        .mean()
     )
 
+
     volume_30 = float(
-        volume.tail(30).mean()
+        volume
+        .tail(30)
+        .mean()
     )
+
 
     volume_ratio = (
         volume_10
@@ -973,25 +1578,34 @@ def analyze_vcp(df):
         else 1
     )
 
+
     volume_dryup = (
         volume_ratio < 0.85
     )
 
-    # --------------------------------------------------------
-    # TIGHT PRICE ACTION
-    # --------------------------------------------------------
+
+    # ========================================================
+    # TIGHT ACTION
+    # ========================================================
 
     last_10 = df.tail(
         10
     )
 
+
     high_10 = float(
-        last_10["High"].max()
+        last_10[
+            "High"
+        ].max()
     )
 
+
     low_10 = float(
-        last_10["Low"].min()
+        last_10[
+            "Low"
+        ].min()
     )
+
 
     range_10 = (
         (
@@ -1001,15 +1615,18 @@ def analyze_vcp(df):
         / high_10
     ) * 100
 
+
     tight_action = (
         range_10 < 10
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # PIVOT
-    # --------------------------------------------------------
+    # ========================================================
 
     pivot = recent_high
+
 
     distance_from_pivot = (
         (
@@ -1019,18 +1636,21 @@ def analyze_vcp(df):
         / pivot
     ) * 100
 
+
     near_pivot = (
         distance_from_pivot >= -2
         and distance_from_pivot <= 8
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # BREAKOUT VOLUME
-    # --------------------------------------------------------
+    # ========================================================
 
     current_volume = float(
         volume.iloc[-1]
     )
+
 
     breakout_volume_ratio = (
         current_volume
@@ -1039,15 +1659,18 @@ def analyze_vcp(df):
         else 0
     )
 
+
     breakout_volume = (
         breakout_volume_ratio >= 1.5
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # SCORE
-    # --------------------------------------------------------
+    # ========================================================
 
     score = 0
+
 
     if trend_score >= 4:
 
@@ -1057,6 +1680,7 @@ def analyze_vcp(df):
 
         score += 15
 
+
     if prior_gain >= 20:
 
         score += 15
@@ -1065,37 +1689,45 @@ def analyze_vcp(df):
 
         score += 8
 
+
     if consolidation_range <= 20:
 
         score += 10
+
 
     if consolidation_range <= 12:
 
         score += 10
 
+
     if volatility_contracting:
 
         score += 10
+
 
     if volume_dryup:
 
         score += 10
 
+
     if tight_action:
 
         score += 5
+
 
     if near_pivot:
 
         score += 10
 
+
     if breakout_volume:
 
         score += 5
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
 
     if score >= 75:
 
@@ -1112,6 +1744,7 @@ def analyze_vcp(df):
     else:
 
         signal = "NO SETUP"
+
 
     return {
 
@@ -1171,126 +1804,12 @@ def analyze_vcp(df):
                 breakout_volume_ratio,
                 2
             )
+
     }
 
 
 # ============================================================
-# NSE STOCK UNIVERSE
-# ============================================================
-
-NSE_STOCKS = [
-
-    "RELIANCE.NS",
-    "TCS.NS",
-    "HDFCBANK.NS",
-    "ICICIBANK.NS",
-    "INFY.NS",
-    "ITC.NS",
-    "SBIN.NS",
-    "BHARTIARTL.NS",
-    "LT.NS",
-    "AXISBANK.NS",
-    "KOTAKBANK.NS",
-    "HINDUNILVR.NS",
-    "MARUTI.NS",
-    "SUNPHARMA.NS",
-    "TITAN.NS",
-    "BAJFINANCE.NS",
-    "BAJAJFINSV.NS",
-    "ADANIENT.NS",
-    "ADANIPORTS.NS",
-    "NTPC.NS",
-    "POWERGRID.NS",
-    "BEL.NS",
-    "HAL.NS",
-    "BHEL.NS",
-    "TRENT.NS",
-    "DIXON.NS",
-    "CDSL.NS",
-    "MCX.NS",
-    "POLYCAB.NS",
-    "PERSISTENT.NS",
-    "COFORGE.NS",
-    "JUBLFOOD.NS",
-    "PIDILITIND.NS",
-    "DEEPAKNTR.NS",
-    "SRF.NS",
-    "TATAELXSI.NS",
-    "MUTHOOTFIN.NS",
-    "SHRIRAMFIN.NS",
-    "AUROPHARMA.NS",
-    "DRREDDY.NS",
-    "CIPLA.NS",
-    "DIVISLAB.NS",
-    "LUPIN.NS",
-    "ZYDUSLIFE.NS"
-]
-
-
-# ============================================================
-# IIFL HISTORICAL DATA FOR STOCK
-# ============================================================
-
-def get_stock_iifl_data(
-    symbol
-):
-
-    instrument_id, details = (
-        get_instrument_id(
-            symbol
-        )
-    )
-
-    if instrument_id is None:
-
-        return None, None, details
-
-    # --------------------------------------------------------
-    # One year historical data
-    # --------------------------------------------------------
-
-    end_date = datetime.now()
-
-    start_date = (
-        end_date
-        - timedelta(days=365)
-    )
-
-    from_date = (
-        start_date.strftime(
-            "%d-%b-%Y"
-        )
-    )
-
-    to_date = (
-        end_date.strftime(
-            "%d-%b-%Y"
-        )
-    )
-
-    df = get_iifl_historical_data(
-        instrument_id=
-            instrument_id,
-
-        from_date=
-            from_date,
-
-        to_date=
-            to_date,
-
-        interval=
-            "1 day"
-    )
-
-    return (
-        df,
-        instrument_id,
-        details
-    )
-
-
-# ============================================================
-# SCAN STOCKS USING IIFL
+# SCAN STOCKS
 # ============================================================
 
 def scan_stocks(
@@ -1303,17 +1822,18 @@ def scan_stocks(
         0
     )
 
-    status_text = st.empty()
+    status = st.empty()
 
     total = len(
         symbols
     )
 
+
     for i, symbol in enumerate(
         symbols
     ):
 
-        clean_name = (
+        name = (
             symbol
             .replace(
                 ".NS",
@@ -1321,10 +1841,11 @@ def scan_stocks(
             )
         )
 
-        status_text.write(
-            f"Scanning {clean_name} "
-            f"({i + 1}/{total})..."
+        status.write(
+            f"Scanning {name} "
+            f"({i + 1}/{total})"
         )
+
 
         try:
 
@@ -1334,50 +1855,64 @@ def scan_stocks(
                 )
             )
 
-            if df is not None:
 
-                analysis = analyze_vcp(
-                    df
+            if df is None:
+
+                progress.progress(
+                    (i + 1)
+                    / total
                 )
 
-                if analysis:
+                continue
 
-                    analysis[
-                        "Stock"
-                    ] = clean_name
 
-                    analysis[
-                        "Instrument ID"
-                    ] = str(
-                        instrument_id
-                    )
+            analysis = analyze_vcp(
+                df
+            )
 
-                    results.append(
-                        analysis
-                    )
 
-        except Exception as e:
+            if analysis:
 
-            # Don't stop the entire scan
-            # because one stock failed.
+                analysis[
+                    "Stock"
+                ] = name
 
-            continue
+                analysis[
+                    "Instrument ID"
+                ] = str(
+                    instrument_id
+                )
+
+                results.append(
+                    analysis
+                )
+
+
+        except Exception:
+
+            pass
+
 
         progress.progress(
-            (i + 1) / total
+            (i + 1)
+            / total
         )
+
 
     progress.empty()
 
-    status_text.empty()
+    status.empty()
+
 
     if not results:
 
         return pd.DataFrame()
 
+
     result_df = pd.DataFrame(
         results
     )
+
 
     result_df = (
         result_df
@@ -1390,16 +1925,18 @@ def scan_stocks(
         )
     )
 
+
     return result_df
 
 
 # ============================================================
-# SIDEBAR
+# SIDEBAR — CONNECTION
 # ============================================================
 
 st.sidebar.header(
     "🔐 IIFL Connection"
 )
+
 
 if (
     "iifl_user_session"
@@ -1416,10 +1953,6 @@ else:
         "🔴 IIFL Not Connected"
     )
 
-    st.sidebar.markdown(
-        "### Login"
-    )
-
     st.sidebar.link_button(
         "🔑 Login with IIFL",
         IIFL_LOGIN_URL
@@ -1427,14 +1960,17 @@ else:
 
 
 # ============================================================
-# HISTORICAL DATA TEST
+# TEST SECTION
 # ============================================================
 
-st.sidebar.markdown("---")
+st.sidebar.markdown(
+    "---"
+)
 
 st.sidebar.header(
     "🧪 IIFL Data Test"
 )
+
 
 test_symbol = st.sidebar.selectbox(
     "Select stock",
@@ -1444,17 +1980,20 @@ test_symbol = st.sidebar.selectbox(
         "BEL.NS",
         "HAL.NS",
         "TITAN.NS",
-        "HDFCBANK.NS"
+        "HDFCBANK.NS",
+        "INFY.NS"
     ]
 )
 
-test_instrument_button = (
+
+test_instrument = (
     st.sidebar.button(
         "1️⃣ Test Instrument"
     )
 )
 
-test_history_button = (
+
+test_history = (
     st.sidebar.button(
         "2️⃣ Test Historical Data"
     )
@@ -1465,7 +2004,7 @@ test_history_button = (
 # TEST INSTRUMENT
 # ============================================================
 
-if test_instrument_button:
+if test_instrument:
 
     if (
         "iifl_user_session"
@@ -1488,6 +2027,7 @@ if test_instrument_button:
                 )
             )
 
+
         if instrument_id:
 
             st.success(
@@ -1495,33 +2035,27 @@ if test_instrument_button:
                 "found in IIFL."
             )
 
-            st.write(
-                "IIFL Instrument ID:"
+
+            st.metric(
+                "IIFL Instrument ID",
+                str(
+                    instrument_id
+                )
             )
 
-            st.code(
-                str(instrument_id)
-            )
 
-            st.write(
-                "Instrument details:"
-            )
+            with st.expander(
+                "View IIFL Instrument Details"
+            ):
 
-            st.json(
-                details
-            )
+                st.json(
+                    details
+                )
 
         else:
 
             st.error(
-                "❌ Stock could not be found "
-                "in IIFL NSE instrument master."
-            )
-
-            st.info(
-                "The app will display the actual "
-                "IIFL columns below if the symbol "
-                "column cannot be detected."
+                "❌ Instrument could not be found."
             )
 
 
@@ -1529,7 +2063,7 @@ if test_instrument_button:
 # TEST HISTORICAL DATA
 # ============================================================
 
-if test_history_button:
+if test_history:
 
     if (
         "iifl_user_session"
@@ -1543,7 +2077,7 @@ if test_history_button:
     else:
 
         with st.spinner(
-            f"Finding {test_symbol.replace('.NS', '')}..."
+            "Finding IIFL instrument..."
         ):
 
             instrument_id, details = (
@@ -1552,19 +2086,24 @@ if test_history_button:
                 )
             )
 
+
         if instrument_id:
 
             st.success(
-                f"✅ Instrument found: "
-                f"{instrument_id}"
+                "✅ Instrument found"
             )
+
 
             end_date = datetime.now()
 
+
             start_date = (
                 end_date
-                - timedelta(days=365)
+                - timedelta(
+                    days=365
+                )
             )
+
 
             from_date = (
                 start_date.strftime(
@@ -1572,49 +2111,48 @@ if test_history_button:
                 )
             )
 
+
             to_date = (
                 end_date.strftime(
                     "%d-%b-%Y"
                 )
             )
 
-            st.write(
-                f"Requesting IIFL historical data "
-                f"from {from_date} to {to_date}..."
-            )
 
             with st.spinner(
-                "Downloading IIFL daily candles..."
+                "Downloading IIFL historical data..."
             ):
 
                 historical_df = (
                     get_iifl_historical_data(
-                        instrument_id=
-                            instrument_id,
 
-                        from_date=
-                            from_date,
+                        instrument_id,
 
-                        to_date=
-                            to_date,
+                        from_date,
 
-                        interval=
-                            "1 day"
+                        to_date,
+
+                        "1 day"
+
                     )
                 )
+
 
             if historical_df is not None:
 
                 st.success(
-                    f"✅ IIFL returned "
+                    f"✅ Received "
                     f"{len(historical_df)} "
-                    f"daily candles."
+                    "daily candles."
                 )
 
+
                 st.subheader(
-                    f"📊 {test_symbol.replace('.NS', '')} "
-                    "IIFL Historical Data"
+                    f"📊 "
+                    f"{test_symbol.replace('.NS', '')} "
+                    "Historical Data"
                 )
+
 
                 st.dataframe(
                     historical_df.tail(
@@ -1623,9 +2161,10 @@ if test_history_button:
                     use_container_width=True
                 )
 
-                # ------------------------------------------------
-                # Test VCP engine
-                # ------------------------------------------------
+
+                # ============================================
+                # VCP TEST
+                # ============================================
 
                 if len(
                     historical_df
@@ -1637,40 +2176,58 @@ if test_history_button:
                         )
                     )
 
+
                     if analysis:
 
                         st.subheader(
-                            "📈 VCP Test"
+                            "📈 VCP Analysis"
                         )
+
 
                         col1, col2, col3 = (
                             st.columns(3)
                         )
 
+
                         col1.metric(
                             "Price",
-                            analysis["Price"]
+                            analysis[
+                                "Price"
+                            ]
                         )
+
 
                         col2.metric(
                             "VCP Score",
-                            analysis["Score"]
+                            analysis[
+                                "Score"
+                            ]
                         )
+
 
                         col3.metric(
                             "Signal",
-                            analysis["Signal"]
+                            analysis[
+                                "Signal"
+                            ]
                         )
 
-                        st.json(
-                            analysis
+
+                        st.dataframe(
+                            pd.DataFrame(
+                                [analysis]
+                            ),
+                            use_container_width=True,
+                            hide_index=True
                         )
+
 
             else:
 
                 st.error(
-                    "❌ IIFL returned no historical data."
+                    "❌ IIFL returned no historical candles."
                 )
+
 
         else:
 
@@ -1683,11 +2240,14 @@ if test_history_button:
 # SCANNER SETTINGS
 # ============================================================
 
-st.sidebar.markdown("---")
+st.sidebar.markdown(
+    "---"
+)
 
 st.sidebar.header(
     "📊 Scanner Settings"
 )
+
 
 score_filter = st.sidebar.slider(
     "Minimum VCP Score",
@@ -1696,6 +2256,7 @@ score_filter = st.sidebar.slider(
     value=45,
     step=5
 )
+
 
 scan_button = st.sidebar.button(
     "🔍 Scan NSE Stocks"
@@ -1714,11 +2275,11 @@ if scan_button:
     ):
 
         st.error(
-            "🔴 IIFL is not connected. "
-            "Please login first."
+            "🔴 IIFL is not connected."
         )
 
         st.stop()
+
 
     with st.spinner(
         "Scanning NSE stocks using IIFL..."
@@ -1728,39 +2289,45 @@ if scan_button:
             NSE_STOCKS
         )
 
+
     if results.empty:
 
         st.error(
-            "❌ No IIFL historical data "
-            "was returned."
+            "❌ No stocks could be processed."
         )
 
         st.info(
-            "Use 'Test Historical Data' "
-            "with RELIANCE first."
+            "Please test RELIANCE using "
+            "'1️⃣ Test Instrument' and "
+            "'2️⃣ Test Historical Data' first."
         )
+
 
     else:
 
         filtered = results[
-            results["Score"]
+            results[
+                "Score"
+            ]
             >= score_filter
         ]
 
+
         st.success(
-            f"✅ Scan completed. "
-            f"{len(results)} stocks processed. "
-            f"{len(filtered)} passed the "
-            f"VCP score filter."
+            f"✅ Scan completed — "
+            f"{len(results)} stocks processed, "
+            f"{len(filtered)} passed the filter."
         )
 
-        # ----------------------------------------------------
-        # TOP VCP SETUPS
-        # ----------------------------------------------------
+
+        # ====================================================
+        # TOP SETUPS
+        # ====================================================
 
         st.subheader(
             "🏆 Top VCP Setups"
         )
+
 
         if filtered.empty:
 
@@ -1769,9 +2336,10 @@ if scan_button:
                 "the selected VCP score."
             )
 
+
         else:
 
-            display_columns = [
+            columns = [
 
                 "Stock",
                 "Price",
@@ -1789,42 +2357,56 @@ if scan_button:
 
             ]
 
-            available_columns = [
-                col
-                for col in display_columns
-                if col in filtered.columns
+
+            columns = [
+                c
+                for c in columns
+                if c in filtered.columns
             ]
 
+
             st.dataframe(
+
                 filtered[
-                    available_columns
+                    columns
                 ],
+
                 use_container_width=True,
+
                 hide_index=True
             )
 
-            # ------------------------------------------------
-            # DOWNLOAD
-            # ------------------------------------------------
 
-            csv = filtered.to_csv(
-                index=False
+            # =================================================
+            # CSV DOWNLOAD
+            # =================================================
+
+            csv = (
+                filtered
+                .to_csv(
+                    index=False
+                )
             )
 
+
             st.download_button(
-                label=(
-                    "⬇️ Download VCP Watchlist CSV"
-                ),
+
+                "⬇️ Download VCP Watchlist CSV",
+
                 data=csv,
+
                 file_name=(
                     "iifl_vcp_watchlist.csv"
                 ),
+
                 mime="text/csv"
+
             )
 
-        # ----------------------------------------------------
+
+        # ====================================================
         # ALL RESULTS
-        # ----------------------------------------------------
+        # ====================================================
 
         with st.expander(
             "📋 View all scanned stocks"
@@ -1836,11 +2418,12 @@ if scan_button:
                 hide_index=True
             )
 
+
 else:
 
-    # --------------------------------------------------------
-    # HOME SCREEN
-    # --------------------------------------------------------
+    # ========================================================
+    # HOME
+    # ========================================================
 
     if (
         "iifl_user_session"
@@ -1853,77 +2436,62 @@ else:
 
         st.markdown(
             """
-            ### IIFL Data Connection Ready
+### IIFL Connection Ready
 
-            Your scanner can now request:
+Use the sidebar in this order:
 
-            - NSE instrument IDs
-            - Historical daily candles
-            - Open
-            - High
-            - Low
-            - Close
-            - Volume
+**1️⃣ Test Instrument**
 
-            Use **🧪 IIFL Data Test** in the
-            sidebar before running the full scan.
-            """
+First verify that RELIANCE can be mapped to an IIFL `instrumentId`.
+
+**2️⃣ Test Historical Data**
+
+Then verify that IIFL returns daily OHLCV candles.
+
+**3️⃣ Scan NSE Stocks**
+
+Once the test works, run the VCP scanner.
+"""
         )
 
     else:
 
         st.warning(
-            "🔴 IIFL is not connected."
+            "🔴 Please login to IIFL."
         )
 
         st.markdown(
             """
-            ### Start here
+### How to start
 
-            1. Click **Login with IIFL** in the sidebar.
-            2. Complete your IIFL login.
-            3. You will be redirected back here.
-            4. The app will automatically generate
-               your IIFL user session.
-            5. Test RELIANCE historical data.
-            6. Run the VCP scanner.
-            """
+1. Click **🔑 Login with IIFL**
+2. Complete your IIFL login.
+3. IIFL redirects back to this app.
+4. The app generates the IIFL user session.
+5. Test RELIANCE.
+6. Run the VCP scanner.
+"""
         )
+
 
     st.markdown(
         """
-        ### VCP Engine
+### 📈 VCP Scanner
 
-        The scanner evaluates:
+The scanner evaluates:
 
-        **Trend**
-        - Price vs 50/150/200-day moving averages
-        - 50 MA vs 150 MA
-        - 150 MA vs 200 MA
+- Price vs 50/150/200-day moving averages
+- Moving-average alignment
+- Prior price advance
+- 40-day consolidation
+- Volatility contraction
+- Volume dry-up
+- 10-day price tightness
+- Pivot proximity
+- Breakout volume
 
-        **Prior Advance**
-        - Previous price appreciation
-
-        **Consolidation**
-        - Recent 40-day range
-
-        **Volatility Contraction**
-        - 20-day vs 60-day volatility
-
-        **Volume Dry-Up**
-        - 10-day vs 30-day volume
-
-        **Tight Price Action**
-        - Recent 10-day range
-
-        **Pivot**
-        - Recent consolidation high
-
-        **Breakout Volume**
-        - Current volume vs 30-day average
-
-        These are combined into a VCP score.
-        """
+The conditions are combined into a VCP score.
+"""
     )
 
 
@@ -1931,7 +2499,9 @@ else:
 # FOOTER
 # ============================================================
 
-st.markdown("---")
+st.markdown(
+    "---"
+)
 
 st.caption(
     "Educational tool only. Not investment advice."
