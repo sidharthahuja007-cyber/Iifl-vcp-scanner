@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 import hashlib
 import requests
+from datetime import datetime, timedelta
 
 # ============================================================
-# IIFL VCP STOCK SCANNER
+# PAGE
 # ============================================================
 
 st.set_page_config(
@@ -16,7 +17,19 @@ st.set_page_config(
 )
 
 st.title("📈 IIFL VCP Stock Scanner")
-st.caption("Minervini-style Volume Contraction Pattern scanner for Indian stocks")
+st.caption(
+    "Minervini-style Volume Contraction Pattern scanner"
+)
+
+# ============================================================
+# IIFL SETTINGS
+# ============================================================
+
+IIFL_BASE_URL = "https://api.iiflcapital.com/v1"
+
+NSE_CONTRACT_URL = (
+    f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
+)
 
 
 # ============================================================
@@ -27,13 +40,7 @@ def get_iifl_user_session(authcode, clientid):
 
     try:
 
-        # Read secret from Streamlit Secrets
         app_secret = st.secrets["IIFL_APP_SECRET"]
-
-        # ----------------------------------------------------
-        # IIFL CHECKSUM
-        # SHA256(clientId + authCode + AppSecret)
-        # ----------------------------------------------------
 
         checksum_string = (
             clientid +
@@ -45,23 +52,18 @@ def get_iifl_user_session(authcode, clientid):
             checksum_string.encode("utf-8")
         ).hexdigest()
 
-        # ----------------------------------------------------
-        # GET USER SESSION
-        # ----------------------------------------------------
-
         response = requests.post(
-            "https://api.iiflcapital.com/v1/getusersession",
+            f"{IIFL_BASE_URL}/getusersession",
             json={
                 "checkSum": checksum
             },
             timeout=20
         )
 
-        # Check HTTP response
         if response.status_code != 200:
 
             st.error(
-                f"IIFL server returned HTTP "
+                f"IIFL HTTP Error: "
                 f"{response.status_code}"
             )
 
@@ -71,30 +73,9 @@ def get_iifl_user_session(authcode, clientid):
 
         data = response.json()
 
-        # ----------------------------------------------------
-        # SUCCESS
-        # ----------------------------------------------------
-
         if data.get("status") == "Ok":
 
-            user_session = data.get("userSession")
-
-            if user_session:
-
-                return user_session
-
-            st.error(
-                "IIFL responded successfully, "
-                "but userSession was not returned."
-            )
-
-            st.json(data)
-
-            return None
-
-        # ----------------------------------------------------
-        # FAILURE
-        # ----------------------------------------------------
+            return data.get("userSession")
 
         st.error("IIFL authentication failed.")
 
@@ -102,26 +83,17 @@ def get_iifl_user_session(authcode, clientid):
 
         return None
 
-    except KeyError:
-
-        st.error(
-            "IIFL_APP_SECRET is missing from "
-            "Streamlit Secrets."
-        )
-
-        return None
-
     except Exception as e:
 
         st.error(
-            f"IIFL authentication error: {str(e)}"
+            f"IIFL authentication error: {e}"
         )
 
         return None
 
 
 # ============================================================
-# READ IIFL REDIRECT PARAMETERS
+# READ REDIRECT PARAMETERS
 # ============================================================
 
 query_params = st.query_params
@@ -130,42 +102,260 @@ authcode = query_params.get("authcode")
 clientid = query_params.get("clientid")
 
 
-# ============================================================
-# IIFL LOGIN / SESSION
-# ============================================================
-
 if authcode and clientid:
 
-    # Store client ID
-    st.session_state["iifl_client_id"] = clientid
-
-    # Generate session only if we don't already have one
     if "iifl_user_session" not in st.session_state:
 
-        with st.spinner("🔐 Connecting to IIFL..."):
+        with st.spinner(
+            "🔐 Connecting to IIFL..."
+        ):
 
-            user_session = get_iifl_user_session(
+            session_token = get_iifl_user_session(
                 authcode,
                 clientid
             )
 
-        if user_session:
+        if session_token:
 
-            st.session_state["iifl_user_session"] = user_session
+            st.session_state[
+                "iifl_user_session"
+            ] = session_token
+
+            st.session_state[
+                "iifl_client_id"
+            ] = clientid
 
             st.success(
                 "✅ IIFL connected successfully!"
             )
 
-            # Remove auth parameters from visible URL
+            # Remove auth parameters from browser URL
             st.query_params.clear()
 
             st.rerun()
 
-else:
 
-    # No IIFL redirect parameters
-    pass
+# ============================================================
+# IIFL AUTH HEADER
+# ============================================================
+
+def get_iifl_headers():
+
+    if "iifl_user_session" not in st.session_state:
+
+        return None
+
+    return {
+        "Authorization":
+            f"Bearer "
+            f"{st.session_state['iifl_user_session']}",
+        "Content-Type":
+            "application/json"
+    }
+
+
+# ============================================================
+# DOWNLOAD IIFL NSE INSTRUMENT MASTER
+# ============================================================
+
+@st.cache_data(ttl=86400)
+def load_iifl_nse_instruments():
+
+    try:
+
+        response = requests.get(
+            NSE_CONTRACT_URL,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        from io import StringIO
+
+        df = pd.read_csv(
+            StringIO(response.text)
+        )
+
+        return df
+
+    except Exception as e:
+
+        st.error(
+            f"Could not download IIFL NSE "
+            f"instrument file: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# FIND IIFL INSTRUMENT
+# ============================================================
+
+def find_iifl_instrument(symbol):
+
+    instruments = load_iifl_nse_instruments()
+
+    if instruments is None:
+
+        return None
+
+    clean_symbol = (
+        symbol
+        .replace(".NS", "")
+        .upper()
+        .strip()
+    )
+
+    # --------------------------------------------------------
+    # DISPLAY AVAILABLE COLUMN NAMES
+    # --------------------------------------------------------
+
+    possible_symbol_columns = [
+        "symbol",
+        "Symbol",
+        "TradingSymbol",
+        "tradingSymbol",
+        "displayName",
+        "DisplayName"
+    ]
+
+    symbol_column = None
+
+    for col in possible_symbol_columns:
+
+        if col in instruments.columns:
+
+            symbol_column = col
+            break
+
+    if symbol_column is None:
+
+        return None
+
+    matches = instruments[
+        instruments[symbol_column]
+        .astype(str)
+        .str.upper()
+        .eq(clean_symbol)
+    ]
+
+    if matches.empty:
+
+        return None
+
+    return matches.iloc[0]
+
+
+# ============================================================
+# SHOW INSTRUMENT DETAILS
+# ============================================================
+
+def get_instrument_details(symbol):
+
+    row = find_iifl_instrument(symbol)
+
+    if row is None:
+
+        return None
+
+    details = {}
+
+    for column in row.index:
+
+        details[str(column)] = str(
+            row[column]
+        )
+
+    return details
+
+
+# ============================================================
+# IIFL HISTORICAL DATA
+# ============================================================
+
+def get_iifl_historical_data(
+    instrument_id,
+    exchange="NSEEQ",
+    from_date=None,
+    to_date=None,
+    interval="1D"
+):
+
+    """
+    IIFL historical-data wrapper.
+
+    IMPORTANT:
+    The exact historical endpoint and request schema
+    should be taken from IIFL's current API specification.
+
+    Keep this function isolated so the rest of the VCP
+    scanner does not need to change.
+    """
+
+    if "iifl_user_session" not in st.session_state:
+
+        return None
+
+    headers = get_iifl_headers()
+
+    if from_date is None:
+
+        from_date = (
+            datetime.now() -
+            timedelta(days=365)
+        )
+
+    if to_date is None:
+
+        to_date = datetime.now()
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    # --------------------------------------------------------
+    #
+    # Do NOT guess the endpoint here.
+    #
+    # Once the exact IIFL historical endpoint is confirmed,
+    # this section will make the request.
+    #
+    # --------------------------------------------------------
+
+    raise NotImplementedError(
+        "IIFL historical endpoint/schema "
+        "needs to be confirmed from the "
+        "current IIFL API specification."
+    )
+
+
+# ============================================================
+# TEST IIFL CONNECTION
+# ============================================================
+
+def test_iifl_connection():
+
+    if "iifl_user_session" not in st.session_state:
+
+        return False
+
+    headers = get_iifl_headers()
+
+    if not headers:
+
+        return False
+
+    return True
+
+
+# ============================================================
+# TEST INSTRUMENT
+# ============================================================
+
+def test_instrument(symbol):
+
+    details = get_instrument_details(symbol)
+
+    return details
 
 
 # ============================================================
@@ -221,11 +411,12 @@ NSE_STOCKS = [
 
 
 # ============================================================
-# DOWNLOAD DATA
+# CURRENT YAHOO DATA
+# TEMPORARY FALLBACK
 # ============================================================
 
 @st.cache_data(ttl=900)
-def get_data(symbol):
+def get_yahoo_data(symbol):
 
     try:
 
@@ -238,12 +429,18 @@ def get_data(symbol):
         )
 
         if df.empty:
+
             return None
 
-        # Handle yfinance multi-index columns
-        if isinstance(df.columns, pd.MultiIndex):
+        if isinstance(
+            df.columns,
+            pd.MultiIndex
+        ):
 
-            df.columns = df.columns.get_level_values(0)
+            df.columns = (
+                df.columns
+                .get_level_values(0)
+            )
 
         required = [
             "Open",
@@ -256,11 +453,12 @@ def get_data(symbol):
         for col in required:
 
             if col not in df.columns:
+
                 return None
 
-        df = df[required].dropna()
-
-        return df
+        return df[
+            required
+        ].dropna()
 
     except Exception:
 
@@ -282,39 +480,45 @@ def analyze_vcp(df):
     low = df["Low"]
     volume = df["Volume"]
 
-    # --------------------------------------------------------
-    # MOVING AVERAGES
-    # --------------------------------------------------------
-
     ma50 = close.rolling(50).mean()
     ma150 = close.rolling(150).mean()
     ma200 = close.rolling(200).mean()
 
-    current_price = float(close.iloc[-1])
+    current_price = float(
+        close.iloc[-1]
+    )
 
     # --------------------------------------------------------
-    # TREND FILTER
+    # TREND
     # --------------------------------------------------------
 
     trend_score = 0
 
-    if current_price > float(ma50.iloc[-1]):
+    if current_price > float(
+        ma50.iloc[-1]
+    ):
         trend_score += 1
 
-    if current_price > float(ma150.iloc[-1]):
+    if current_price > float(
+        ma150.iloc[-1]
+    ):
         trend_score += 1
 
     if len(ma200.dropna()) > 0:
 
-        if current_price > float(ma200.iloc[-1]):
+        if current_price > float(
+            ma200.iloc[-1]
+        ):
             trend_score += 1
 
     if ma50.iloc[-1] > ma150.iloc[-1]:
+
         trend_score += 1
 
     if len(ma200.dropna()) > 0:
 
         if ma150.iloc[-1] > ma200.iloc[-1]:
+
             trend_score += 1
 
     # --------------------------------------------------------
@@ -331,11 +535,12 @@ def analyze_vcp(df):
     )
 
     prior_gain = (
-        (current_price / old_price) - 1
+        current_price /
+        old_price - 1
     ) * 100
 
     # --------------------------------------------------------
-    # RECENT CONSOLIDATION
+    # CONSOLIDATION
     # --------------------------------------------------------
 
     recent = df.tail(40)
@@ -354,21 +559,26 @@ def analyze_vcp(df):
     ) * 100
 
     # --------------------------------------------------------
-    # VOLATILITY CONTRACTION
+    # VOLATILITY
     # --------------------------------------------------------
 
     returns = close.pct_change()
 
-    volatility_20 = returns.tail(20).std()
+    volatility_20 = (
+        returns.tail(20).std()
+    )
 
-    volatility_60 = returns.tail(60).std()
+    volatility_60 = (
+        returns.tail(60).std()
+    )
 
     volatility_contracting = (
-        volatility_20 < volatility_60
+        volatility_20 <
+        volatility_60
     )
 
     # --------------------------------------------------------
-    # VOLUME CONTRACTION
+    # VOLUME
     # --------------------------------------------------------
 
     volume_10 = float(
@@ -380,7 +590,8 @@ def analyze_vcp(df):
     )
 
     volume_ratio = (
-        volume_10 / volume_30
+        volume_10 /
+        volume_30
         if volume_30 > 0
         else 1
     )
@@ -390,7 +601,7 @@ def analyze_vcp(df):
     )
 
     # --------------------------------------------------------
-    # TIGHT PRICE ACTION
+    # TIGHT ACTION
     # --------------------------------------------------------
 
     last_10 = df.tail(10)
@@ -437,7 +648,8 @@ def analyze_vcp(df):
     )
 
     breakout_volume_ratio = (
-        current_volume / volume_30
+        current_volume /
+        volume_30
         if volume_30 > 0
         else 0
     )
@@ -447,7 +659,7 @@ def analyze_vcp(df):
     )
 
     # --------------------------------------------------------
-    # VCP SCORE
+    # SCORE
     # --------------------------------------------------------
 
     score = 0
@@ -518,7 +730,9 @@ def analyze_vcp(df):
 
     return {
 
-        "Price": round(current_price, 2),
+        "Price": round(
+            current_price, 2
+        ),
 
         "Score": score,
 
@@ -527,89 +741,33 @@ def analyze_vcp(df):
         "Trend Score": trend_score,
 
         "Prior Gain %": round(
-            prior_gain,
-            2
+            prior_gain, 2
         ),
 
         "Consolidation %": round(
-            consolidation_range,
-            2
+            consolidation_range, 2
         ),
 
         "10D Range %": round(
-            range_10,
-            2
+            range_10, 2
         ),
 
         "Volume Ratio": round(
-            volume_ratio,
-            2
+            volume_ratio, 2
         ),
 
         "Pivot": round(
-            pivot,
-            2
+            pivot, 2
         ),
 
         "Distance Pivot %": round(
-            distance_from_pivot,
-            2
+            distance_from_pivot, 2
         ),
 
         "Breakout Vol Ratio": round(
-            breakout_volume_ratio,
-            2
+            breakout_volume_ratio, 2
         ),
     }
-
-
-# ============================================================
-# SCANNER
-# ============================================================
-
-def scan_stocks(symbols):
-
-    results = []
-
-    progress = st.progress(0)
-
-    total = len(symbols)
-
-    for i, symbol in enumerate(symbols):
-
-        df = get_data(symbol)
-
-        analysis = analyze_vcp(df)
-
-        if analysis:
-
-            analysis["Stock"] = symbol.replace(
-                ".NS",
-                ""
-            )
-
-            results.append(analysis)
-
-        progress.progress(
-            (i + 1) / total
-        )
-
-    progress.empty()
-
-    if not results:
-
-        return pd.DataFrame()
-
-    result_df = pd.DataFrame(
-        results
-    )
-
-    result_df = result_df.sort_values(
-        "Score",
-        ascending=False
-    )
-
-    return result_df
 
 
 # ============================================================
@@ -630,12 +788,66 @@ else:
         "🔴 IIFL Not Connected"
     )
 
-    st.sidebar.markdown(
-        """
-        Login through your IIFL login URL
-        to establish an API session.
-        """
-    )
+st.sidebar.markdown("---")
+
+st.sidebar.header(
+    "IIFL Data Test"
+)
+
+test_symbol = st.sidebar.selectbox(
+    "Test NSE Stock",
+    [
+        "RELIANCE.NS",
+        "TCS.NS",
+        "BEL.NS",
+        "HAL.NS",
+        "TITAN.NS"
+    ]
+)
+
+test_button = st.sidebar.button(
+    "🧪 Test IIFL Instrument"
+)
+
+
+if test_button:
+
+    if "iifl_user_session" not in st.session_state:
+
+        st.error(
+            "Please connect IIFL first."
+        )
+
+    else:
+
+        with st.spinner(
+            "Finding IIFL instrument..."
+        ):
+
+            details = test_instrument(
+                test_symbol
+            )
+
+        if details:
+
+            st.success(
+                f"✅ {test_symbol.replace('.NS', '')} "
+                "found in IIFL instrument master."
+            )
+
+            st.json(details)
+
+        else:
+
+            st.error(
+                "Stock could not be found "
+                "in IIFL NSE instrument master."
+            )
+
+
+# ============================================================
+# SCANNER SETTINGS
+# ============================================================
 
 st.sidebar.markdown("---")
 
@@ -655,14 +867,6 @@ scan_button = st.sidebar.button(
     "🔍 Scan NSE Stocks"
 )
 
-st.sidebar.markdown("---")
-
-st.sidebar.info(
-    "This scanner identifies potential VCP "
-    "setups. Signals should be manually verified "
-    "before trading."
-)
-
 
 # ============================================================
 # MAIN
@@ -670,162 +874,108 @@ st.sidebar.info(
 
 if scan_button:
 
-    with st.spinner(
-        "Scanning NSE stocks..."
+    st.warning(
+        "⚠️ Historical IIFL candle endpoint is not "
+        "connected yet. The scanner is currently "
+        "using Yahoo Finance data."
+    )
+
+    results = []
+
+    progress = st.progress(0)
+
+    for i, symbol in enumerate(
+        NSE_STOCKS
     ):
 
-        results = scan_stocks(
-            NSE_STOCKS
+        df = get_yahoo_data(
+            symbol
         )
 
-    if results.empty:
-
-        st.error(
-            "No market data was returned. "
-            "Please try again."
+        analysis = analyze_vcp(
+            df
         )
 
-    else:
+        if analysis:
 
-        filtered = results[
-            results["Score"] >= score_filter
+            analysis["Stock"] = (
+                symbol.replace(
+                    ".NS",
+                    ""
+                )
+            )
+
+            results.append(
+                analysis
+            )
+
+        progress.progress(
+            (i + 1) /
+            len(NSE_STOCKS)
+        )
+
+    progress.empty()
+
+    if results:
+
+        result_df = pd.DataFrame(
+            results
+        )
+
+        result_df = result_df.sort_values(
+            "Score",
+            ascending=False
+        )
+
+        filtered = result_df[
+            result_df["Score"] >= score_filter
         ]
 
         st.success(
             f"Scan completed. "
-            f"{len(filtered)} stocks passed "
-            f"the filter."
+            f"{len(filtered)} stocks passed."
         )
-
-        # ----------------------------------------------------
-        # TOP SETUPS
-        # ----------------------------------------------------
 
         st.subheader(
             "🏆 Top VCP Setups"
         )
 
-        if filtered.empty:
-
-            st.warning(
-                "No stocks currently meet "
-                "the selected score."
-            )
-
-        else:
-
-            display_columns = [
-
-                "Stock",
-                "Price",
-                "Score",
-                "Signal",
-                "Trend Score",
-                "Prior Gain %",
-                "Consolidation %",
-                "10D Range %",
-                "Volume Ratio",
-                "Pivot",
-                "Distance Pivot %",
-                "Breakout Vol Ratio",
-
-            ]
-
-            st.dataframe(
-                filtered[
-                    display_columns
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
-
-        # ----------------------------------------------------
-        # DOWNLOAD
-        # ----------------------------------------------------
-
-        csv = filtered.to_csv(
-            index=False
-        )
-
-        st.download_button(
-            label="⬇️ Download Watchlist CSV",
-            data=csv,
-            file_name="vcp_watchlist.csv",
-            mime="text/csv"
-        )
-
-        # ----------------------------------------------------
-        # ALL RESULTS
-        # ----------------------------------------------------
-
-        with st.expander(
-            "View all scanned stocks"
-        ):
-
-            st.dataframe(
-                results,
-                use_container_width=True,
-                hide_index=True
-            )
-
-else:
-
-    if "iifl_user_session" in st.session_state:
-
-        st.success(
-            "🟢 IIFL session active. "
-            "You can now run the scanner."
+        st.dataframe(
+            filtered,
+            use_container_width=True,
+            hide_index=True
         )
 
     else:
 
-        st.info(
-            "Login to IIFL first, then return "
-            "to this page."
+        st.error(
+            "No data returned."
         )
+
+else:
+
+    st.info(
+        "Connect IIFL and use "
+        "'Test IIFL Instrument' first."
+    )
 
     st.markdown(
         """
-        ### How this scanner works
+        ### Current status
 
-        The scanner checks several characteristics
-        associated with a Minervini-style VCP setup:
+        🟢 **IIFL authentication:** Connected
 
-        **1. Trend**
-        - Price above moving averages
-        - 50-day MA
-        - 150-day MA
-        - 200-day MA
+        🟢 **NSE instrument master:** Ready
 
-        **2. Prior Advance**
-        - Looks for a meaningful advance before
-          consolidation.
+        🟡 **IIFL historical candles:** Next step
 
-        **3. Contraction**
-        - Measures recent trading range.
-        - Looks for tighter price action.
+        🟢 **VCP engine:** Ready
 
-        **4. Volume Dry-Up**
-        - Compares recent volume with the
-          previous average.
-
-        **5. Pivot**
-        - Identifies the recent consolidation high.
-
-        **6. Breakout Volume**
-        - Checks whether current volume is
-          significantly above the recent average.
-
-        **7. VCP Score**
-        - Combines these conditions into a
-          0–100 score.
+        The next step is to connect the exact
+        IIFL historical-candle endpoint to the
+        `get_iifl_historical_data()` function.
         """
     )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
 
 st.markdown("---")
 
