@@ -164,7 +164,7 @@ def load_iifl_nse_instruments():
     try:
 
         response = requests.get(
-            NSE_CONTRACT_URL,
+            "https://api.iiflcapital.com/v1/contractfiles/NSEEQ.csv",
             timeout=30
         )
 
@@ -181,8 +181,7 @@ def load_iifl_nse_instruments():
     except Exception as e:
 
         st.error(
-            f"Could not download IIFL NSE "
-            f"instrument file: {e}"
+            f"Could not download IIFL NSE instrument file: {e}"
         )
 
         return None
@@ -197,7 +196,6 @@ def find_iifl_instrument(symbol):
     instruments = load_iifl_nse_instruments()
 
     if instruments is None:
-
         return None
 
     clean_symbol = (
@@ -207,67 +205,41 @@ def find_iifl_instrument(symbol):
         .strip()
     )
 
-    # --------------------------------------------------------
-    # DISPLAY AVAILABLE COLUMN NAMES
-    # --------------------------------------------------------
+    # SHOW ACTUAL IIFL COLUMNS
+    st.write("IIFL instrument columns:")
+    st.write(list(instruments.columns))
 
-    possible_symbol_columns = [
-        "symbol",
-        "Symbol",
-        "TradingSymbol",
-        "tradingSymbol",
-        "displayName",
-        "DisplayName"
-    ]
+    st.write("First 5 IIFL instruments:")
+    st.dataframe(
+        instruments.head(5),
+        use_container_width=True
+    )
 
-    symbol_column = None
+    # Try every text column to find the symbol
+    for column in instruments.columns:
 
-    for col in possible_symbol_columns:
+        try:
 
-        if col in instruments.columns:
+            values = (
+                instruments[column]
+                .astype(str)
+                .str.upper()
+                .str.strip()
+            )
 
-            symbol_column = col
-            break
+            matches = instruments[
+                values == clean_symbol
+            ]
 
-    if symbol_column is None:
+            if not matches.empty:
 
-        return None
+                return matches.iloc[0]
 
-    matches = instruments[
-        instruments[symbol_column]
-        .astype(str)
-        .str.upper()
-        .eq(clean_symbol)
-    ]
+        except Exception:
 
-    if matches.empty:
+            continue
 
-        return None
-
-    return matches.iloc[0]
-
-
-# ============================================================
-# SHOW INSTRUMENT DETAILS
-# ============================================================
-
-def get_instrument_details(symbol):
-
-    row = find_iifl_instrument(symbol)
-
-    if row is None:
-
-        return None
-
-    details = {}
-
-    for column in row.index:
-
-        details[str(column)] = str(
-            row[column]
-        )
-
-    return details
+    return None
 
 
 # ============================================================
