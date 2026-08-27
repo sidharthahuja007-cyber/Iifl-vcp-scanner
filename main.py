@@ -45,16 +45,96 @@ IIFL_NSE_CSV_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
 EXCHANGE_FALLBACKS = ["NSEEQ", "NSE", "N"]
 
 NSE_STOCKS = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
-    "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "LT.NS", "AXISBANK.NS",
-    "KOTAKBANK.NS", "HINDUNILVR.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
-    "BAJFINANCE.NS", "BAJAJFINSV.NS", "ADANIENT.NS", "ADANIPORTS.NS", "NTPC.NS",
-    "POWERGRID.NS", "BEL.NS", "HAL.NS", "BHEL.NS", "TRENT.NS",
-    "DIXON.NS", "CDSL.NS", "MCX.NS", "POLYCAB.NS", "PERSISTENT.NS",
-    "COFORGE.NS", "JUBLFOOD.NS", "PIDILITIND.NS", "DEEPAKNTR.NS", "SRF.NS",
-    "TATAELXSI.NS", "MUTHOOTFIN.NS", "SHRIRAMFIN.NS", "AUROPHARMA.NS", "DRREDDY.NS",
-    "CIPLA.NS", "DIVISLAB.NS", "LUPIN.NS", "ZYDUSLIFE.NS"
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS",
+    "SBIN.NS", "BHARTIARTL.NS", "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS",
+    "HINDUNILVR.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "BAJFINANCE.NS",
+    "BAJAJFINSV.NS", "ADANIENT.NS", "ADANIPORTS.NS", "NTPC.NS", "POWERGRID.NS",
+    "BEL.NS", "HAL.NS", "BHEL.NS", "TRENT.NS", "DIXON.NS", "CDSL.NS", "MCX.NS",
+    "POLYCAB.NS", "PERSISTENT.NS", "COFORGE.NS", "JUBLFOOD.NS", "PIDILITIND.NS",
+    "DEEPAKNTR.NS", "SRF.NS", "TATAELXSI.NS", "MUTHOOTFIN.NS", "SHRIRAMFIN.NS",
+    "AUROPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS", "LUPIN.NS",
+    "ZYDUSLIFE.NS", "ABB.NS", "ABBOTINDIA.NS", "ABCAPITAL.NS", "ABFRL.NS",
+    "ACC.NS", "ALKEM.NS", "AMBUJACEM.NS", "APLAPOLLO.NS", "APOLLOHOSP.NS",
+    "APOLLOTYRE.NS", "ASHOKLEY.NS", "ASIANPAINT.NS", "ASTRAL.NS", "ATUL.NS",
+    "AUBANK.NS", "BAJAJ-AUTO.NS", "BALKRISIND.NS", "BALRAMCHIN.NS",
+    "BANDHANBNK.NS", "BANKBARODA.NS", "BATAINDIA.NS", "BERGEPAINT.NS",
+    "BHARATFORG.NS", "BHARTIHEXA.NS", "BIOCON.NS", "BOSCHLTD.NS",
+    "BPCL.NS", "BRITANNIA.NS", "BSOFT.NS", "CAMS.NS", "CANBK.NS",
+    "CANFINHOME.NS", "CHAMBLFERT.NS", "CHOLAFIN.NS", "CIPLA.NS", "COALINDIA.NS",
+    "COFORGE.NS", "COLPAL.NS", "CONCOR.NS", "COROMANDEL.NS", "CROMPTON.NS",
+    "CUB.NS", "CUMMINSIND.NS", "DABUR.NS", "DALBHARAT.NS", "DEEPAKNTR.NS",
+    "DELHIVERY.NS", "DELTACORP.NS", "DIVISLAB.NS", "DLF.NS", "DRREDDY.NS",
+    "EICHERMOT.NS", "ESCORTS.NS", "EXIDEIND.NS", "FEDERALBNK.NS",
+    "GAIL.NS", "GLENMARK.NS", "GMRINFRA.NS", "GNFC.NS", "GODREJCP.NS",
+    "GODREJPROP.NS", "GRANULES.NS", "GRASIM.NS", "GUJGASLTD.NS",
+    "HAVELLS.NS", "HCLTECH.NS", "HDFCAMC.NS", "HDFCLIFE.NS",
+    "HEROMOTOCO.NS", "HFCL.NS", "HINDALCO.NS", "HINDCOPPER.NS",
+    "HINDPETRO.NS", "HONAUT.NS", "IBULHSGFIN.NS", "ICICIGI.NS",
+    "ICICIPRULI.NS", "IDEA.NS", "IDFC.NS", "IDFCFIRSTB.NS", "IEX.NS",
+    "IGL.NS", "INDHOTEL.NS", "INDIACEM.NS", "INDIAMART.NS", "INDIGO.NS",
+    "INDUSINDBK.NS", "INDUSTOWER.NS", "INTELLECT.NS", "IOC.NS", "IPCALAB.NS",
+    "IRCTC.NS", "IRFC.NS", "ITC.NS", "JINDALSTEL.NS", "JKCEMENT.NS",
+    "JSWENERGY.NS", "JSWSTEEL.NS", "JUBLPHARMA.NS", "KALYANKJIL.NS",
+    "KEI.NS", "KOTAKBANK.NS", "L&TFH.NS", "LALPATHLAB.NS", "LAURUSLABS.NS",
+    "LICHSGFIN.NS", "LICI.NS", "LODHA.NS", "LTIM.NS", "LTTS.NS",
+    "M&M.NS", "M&MFIN.NS", "MANAPPURAM.NS", "MARICO.NS", "MCDOWELL-N.NS",
+    "METROPOLIS.NS", "MFSL.NS", "MGL.NS", "MOTHERSON.NS", "MPHASIS.NS",
+    "NATIONALUM.NS", "NAUKRI.NS", "NAVINFLUOR.NS", "NBCC.NS", "NESTLEIND.NS",
+    "NMDC.NS", "OBEROIRLTY.NS", "OFSS.NS", "OIL.NS", "ONGC.NS", "PAGEIND.NS",
+    "PATANJALI.NS", "PAYTM.NS", "PEL.NS", "PETRONET.NS", "PFC.NS",
+    "PHOENIXLTD.NS", "PIIND.NS", "PNB.NS", "PNBHOUSING.NS", "PVRINOX.NS",
+    "RAMCOCEM.NS", "RBLBANK.NS", "RECLTD.NS", "SAIL.NS", "SBICARD.NS",
+    "SBILIFE.NS", "SHREECEM.NS", "SIEMENS.NS", "SONACOMS.NS", "SUNTV.NS",
+    "SYNGENE.NS", "TATACHEM.NS", "TATACOMM.NS", "TATACONSUM.NS",
+    "TATAMOTORS.NS", "TATAPOWER.NS", "TATASTEEL.NS", "TECHM.NS", "TIINDIA.NS",
+    "TORNTPHARM.NS", "TORNTPOWER.NS", "TVSMOTOR.NS", "UBL.NS", "UPL.NS",
+    "VBL.NS", "VEDL.NS", "VOLTAS.NS", "WHIRLPOOL.NS", "WIPRO.NS", "ZEEL.NS",
+    "ZOMATO.NS"
 ]
+
+# Remove duplicates while preserving order
+NSE_STOCKS = list(dict.fromkeys(NSE_STOCKS))
+
+
+@st.cache_data(ttl=86400)
+def fetch_nse_fo_stock_list():
+    """
+    Attempts to fetch the live NSE F&O eligible stock list.
+    NSE frequently blocks non-browser requests (esp. from cloud IPs like
+    Streamlit Cloud), so this may fail — that's expected and handled by
+    the caller falling back to the static NSE_STOCKS list above.
+    """
+    url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,*/*",
+        "Referer": "https://www.nseindia.com/"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        df.columns = [c.strip() for c in df.columns]
+        symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
+        if symbol_col is None:
+            return None
+        symbols = (
+            df[symbol_col]
+            .astype(str)
+            .str.strip()
+            .replace("", np.nan)
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        symbols = [s for s in symbols if s.isupper() and s.isalnum() is False or s.isalpha() or "-" in s or "&" in s]
+        return sorted(set(f"{s}.NS" for s in symbols if s and s != "SYMBOL"))
+    except Exception:
+        return None
 
 # ============================================================
 # IIFL LOGIN / USER SESSION
@@ -575,6 +655,41 @@ else:
     st.sidebar.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
 
 st.sidebar.markdown("---")
+st.sidebar.header("📋 Watchlist")
+
+watchlist_source = st.sidebar.radio(
+    "Stock universe",
+    ["Auto-fetch NSE F&O list", "Built-in F&O list (~180 stocks)", "Custom (paste symbols)"],
+    index=1
+)
+
+if watchlist_source == "Auto-fetch NSE F&O list":
+    fetched = fetch_nse_fo_stock_list()
+    if fetched:
+        active_stocks = fetched
+        st.sidebar.success(f"✅ Fetched {len(active_stocks)} F&O stocks from NSE.")
+    else:
+        active_stocks = NSE_STOCKS
+        st.sidebar.warning(
+            f"⚠️ NSE fetch failed (often blocked from cloud servers). "
+            f"Using built-in list of {len(active_stocks)} stocks instead."
+        )
+elif watchlist_source == "Custom (paste symbols)":
+    custom_text = st.sidebar.text_area(
+        "One symbol per line (e.g. RELIANCE.NS)",
+        value="\n".join(NSE_STOCKS[:20]),
+        height=200
+    )
+    active_stocks = [
+        s.strip().upper() if s.strip().upper().endswith(".NS") else s.strip().upper() + ".NS"
+        for s in custom_text.splitlines() if s.strip()
+    ]
+    st.sidebar.info(f"{len(active_stocks)} symbols in custom list.")
+else:
+    active_stocks = NSE_STOCKS
+    st.sidebar.info(f"{len(active_stocks)} stocks in built-in F&O list.")
+
+st.sidebar.markdown("---")
 st.sidebar.header("🧪 IIFL Data Test")
 
 test_symbol = st.sidebar.selectbox(
@@ -676,8 +791,8 @@ if scan_button:
         st.error("🔴 IIFL is not connected.")
         st.stop()
 
-    with st.spinner("Scanning NSE stocks using IIFL..."):
-        results = scan_stocks(NSE_STOCKS)
+    with st.spinner(f"Scanning {len(active_stocks)} NSE stocks using IIFL..."):
+        results = scan_stocks(active_stocks)
 
     if results.empty:
         st.error("❌ No stocks could be processed.")
