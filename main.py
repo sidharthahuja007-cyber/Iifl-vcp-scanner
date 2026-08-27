@@ -12,20 +12,20 @@ from io import StringIO
 # ============================================================
 
 st.set_page_config(
-    page_title="IIFL Diagnostic Tool",
-    page_icon="🩺",
+    page_title="IIFL VCP Scanner",
+    page_icon="📈",
     layout="wide"
 )
 
-st.title("🩺 IIFL Historical-Data Diagnostic Tool")
+st.title("📈 IIFL VCP Stock Scanner")
 
 st.caption(
-    "Finds exactly which part of the IIFL pipeline is failing: "
-    "login, instrument lookup, or historical-data payload."
+    "Minervini-style Volume Contraction Pattern scanner "
+    "using IIFL historical market data"
 )
 
 # ============================================================
-# CONFIG (same endpoints as the scanner app)
+# IIFL CONFIGURATION
 # ============================================================
 
 IIFL_BASE_URL = "https://api.iiflcapital.com/v1"
@@ -38,19 +38,26 @@ IIFL_LOGIN_URL = (
 IIFL_NSE_JSON_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.json"
 IIFL_NSE_CSV_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
 
+# Exchange codes to try, in priority order, when a historical-data
+# call is rejected at the API level. Per IIFL docs the primary
+# value is "NSEEQ"; the others are kept as automatic fallbacks in
+# case of an account-specific mapping difference.
+EXCHANGE_FALLBACKS = ["NSEEQ", "NSE", "N"]
 
-def mask(token, keep=4):
-    """Mask a secret, keeping only the first/last `keep` chars visible."""
-    if not token:
-        return "None"
-    token = str(token)
-    if len(token) <= keep * 2:
-        return "*" * len(token)
-    return token[:keep] + "..." + token[-keep:] + f"  ({len(token)} chars)"
-
+NSE_STOCKS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
+    "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "LT.NS", "AXISBANK.NS",
+    "KOTAKBANK.NS", "HINDUNILVR.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
+    "BAJFINANCE.NS", "BAJAJFINSV.NS", "ADANIENT.NS", "ADANIPORTS.NS", "NTPC.NS",
+    "POWERGRID.NS", "BEL.NS", "HAL.NS", "BHEL.NS", "TRENT.NS",
+    "DIXON.NS", "CDSL.NS", "MCX.NS", "POLYCAB.NS", "PERSISTENT.NS",
+    "COFORGE.NS", "JUBLFOOD.NS", "PIDILITIND.NS", "DEEPAKNTR.NS", "SRF.NS",
+    "TATAELXSI.NS", "MUTHOOTFIN.NS", "SHRIRAMFIN.NS", "AUROPHARMA.NS", "DRREDDY.NS",
+    "CIPLA.NS", "DIVISLAB.NS", "LUPIN.NS", "ZYDUSLIFE.NS"
+]
 
 # ============================================================
-# LOGIN
+# IIFL LOGIN / USER SESSION
 # ============================================================
 
 def get_iifl_user_session(authcode, clientid):
@@ -60,52 +67,39 @@ def get_iifl_user_session(authcode, clientid):
         st.error("IIFL_APP_SECRET is missing from Streamlit Secrets.")
         return None
 
-    checksum_string = str(clientid) + str(authcode) + str(app_secret)
-    checksum = hashlib.sha256(checksum_string.encode("utf-8")).hexdigest()
-
-    with st.expander("🔍 Login request diagnostics", expanded=True):
-        st.write("**Checksum input (masked):**")
-        st.code(
-            f"clientid = {clientid}\n"
-            f"authcode = {mask(authcode)}\n"
-            f"app_secret = {mask(app_secret)}\n"
-            f"checksum(sha256) = {checksum}"
-        )
-
     try:
+        checksum_string = str(clientid) + str(authcode) + str(app_secret)
+        checksum = hashlib.sha256(checksum_string.encode("utf-8")).hexdigest()
+
         response = requests.post(
             f"{IIFL_BASE_URL}/getusersession",
             json={"checkSum": checksum},
             timeout=30
         )
-    except Exception as e:
-        st.error(f"Login request could not be sent: {e}")
-        return None
 
-    with st.expander("🔍 Login response diagnostics", expanded=True):
-        st.write("**HTTP status:**", response.status_code)
-        st.write("**Response headers:**")
-        st.json(dict(response.headers))
-        st.write("**Raw response body:**")
-        st.code(response.text)
+        if response.status_code != 200:
+            st.error(f"IIFL login HTTP error: {response.status_code}")
+            st.code(response.text)
+            return None
 
-    if response.status_code != 200:
-        st.error(f"IIFL login HTTP error: {response.status_code}")
-        return None
-
-    try:
         data = response.json()
-    except Exception:
-        st.error("Login response was not valid JSON.")
+
+        if data.get("status") == "Ok":
+            session = data.get("userSession")
+            if session:
+                return session
+
+        st.error("IIFL did not return a user session.")
+        safe_data = dict(data)
+        for key in ["userSession", "accessToken", "token"]:
+            if key in safe_data:
+                safe_data[key] = "***HIDDEN***"
+        st.json(safe_data)
         return None
 
-    if data.get("status") == "Ok":
-        session = data.get("userSession")
-        if session:
-            return session
-
-    st.error("IIFL did not return a user session.")
-    return None
+    except Exception as e:
+        st.error(f"IIFL authentication error: {e}")
+        return None
 
 
 # ============================================================
@@ -122,6 +116,7 @@ if authcode and clientid and "iifl_user_session" not in st.session_state:
     if user_session:
         st.session_state["iifl_user_session"] = user_session
         st.session_state["iifl_client_id"] = clientid
+        st.session_state["iifl_connected"] = True
         st.query_params.clear()
         st.rerun()
 
@@ -138,6 +133,436 @@ def get_iifl_headers():
 
 
 # ============================================================
+# LOAD IIFL NSE INSTRUMENT MASTER
+# ============================================================
+
+@st.cache_data(ttl=86400)
+def load_iifl_nse_instruments():
+    try:
+        response = requests.get(IIFL_NSE_JSON_URL, timeout=30)
+        if response.status_code == 200:
+            raw = response.json()
+            records = None
+            if isinstance(raw, list):
+                records = raw
+            elif isinstance(raw, dict):
+                for key in ["result", "data", "instruments", "records"]:
+                    if key in raw and isinstance(raw[key], list):
+                        records = raw[key]
+                        break
+                if records is None:
+                    for value in raw.values():
+                        if isinstance(value, list):
+                            records = value
+                            break
+            if records:
+                df = pd.DataFrame(records)
+                if not df.empty:
+                    return df
+    except Exception:
+        pass
+
+    try:
+        response = requests.get(IIFL_NSE_CSV_URL, timeout=30)
+        if response.status_code == 200:
+            df = pd.read_csv(StringIO(response.text))
+            if not df.empty:
+                return df
+    except Exception:
+        pass
+
+    return None
+
+
+# ============================================================
+# SYMBOL / INSTRUMENT LOOKUP
+# ============================================================
+
+def normalize_symbol(symbol):
+    symbol = str(symbol).upper().strip()
+    return (
+        symbol.replace(".NS", "").replace(".NSE", "")
+        .replace("-EQ", "").replace("_EQ", "").replace(" EQ", "").strip()
+    )
+
+
+def find_instrument_id(record):
+    if not isinstance(record, dict):
+        return None
+    possible_keys = [
+        "instrumentId", "InstrumentId", "instrumentID", "InstrumentID",
+        "instrument_id", "Instrument_Id", "NSEInstrumentId", "nseInstrumentId",
+        "securityId", "SecurityId", "scripCode", "ScripCode", "token", "Token"
+    ]
+    for key in possible_keys:
+        if key in record:
+            value = record[key]
+            if value is not None and str(value).strip() not in ["", "nan", "None"]:
+                return str(value)
+    for key, value in record.items():
+        key_clean = str(key).lower().replace("_", "").replace(" ", "")
+        if "instrumentid" in key_clean and value is not None:
+            return str(value)
+    return None
+
+
+def find_iifl_instrument(symbol):
+    instruments = load_iifl_nse_instruments()
+    if instruments is None:
+        st.error("❌ IIFL NSE instrument master could not be downloaded.")
+        return None
+
+    target = normalize_symbol(symbol)
+
+    for column in instruments.columns:
+        try:
+            values = instruments[column].astype(str).str.upper().str.strip()
+            normalized_values = (
+                values.str.replace(".NS", "", regex=False)
+                .str.replace("-EQ", "", regex=False)
+                .str.replace("_EQ", "", regex=False)
+                .str.replace(" EQ", "", regex=False)
+                .str.strip()
+            )
+            match = instruments[normalized_values == target]
+            if not match.empty:
+                return match.iloc[0]
+        except Exception:
+            continue
+
+    st.error(f"❌ {target} was not found in the IIFL NSE instrument master.")
+    return None
+
+
+def get_instrument_details(symbol):
+    row = find_iifl_instrument(symbol)
+    if row is None:
+        return None
+    if isinstance(row, pd.Series):
+        return row.replace({np.nan: None}).to_dict()
+    if isinstance(row, dict):
+        return row
+    return None
+
+
+def get_instrument_id(symbol):
+    details = get_instrument_details(symbol)
+    if details is None:
+        return None, None
+    instrument_id = find_instrument_id(details)
+    return instrument_id, details
+
+
+# ============================================================
+# HISTORICAL DATA — with automatic exchange fallback + transparent errors
+# ============================================================
+
+def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
+    headers = get_iifl_headers()
+    if headers is None:
+        return None, "IIFL session is not available."
+
+    url = f"{IIFL_BASE_URL}/marketdata/historicaldata"
+    payload = {
+        "exchange": exchange,
+        "instrumentId": str(instrument_id),
+        "interval": interval,
+        "fromDate": from_date,
+        "toDate": to_date
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+    except Exception as e:
+        return None, f"Network error calling IIFL: {e}"
+
+    if response.status_code == 401:
+        return None, "HTTP 401 — session token invalid or expired. Please log in again."
+    if response.status_code == 403:
+        return None, (
+            "HTTP 403 — access denied. This usually means Market Data API is not "
+            "activated/entitled on this account or app key. Contact IIFL support."
+        )
+    if response.status_code != 200:
+        return None, f"IIFL historical-data HTTP error: {response.status_code}\n{response.text}"
+
+    try:
+        data = response.json()
+    except Exception:
+        return None, f"IIFL returned an invalid (non-JSON) response:\n{response.text}"
+
+    if data.get("status") not in ("Ok", "ok", True):
+        message = data.get("message", "Unknown error")
+        return None, (
+            f"IIFL rejected the request for exchange='{exchange}': "
+            f"status='{data.get('status')}', message='{message}'"
+        )
+
+    result = data.get("result")
+
+    # The IIFL historicaldata response is documented as a string, not JSON,
+    # in some deployments — handle both.
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            pass
+
+    # Documented shape: result -> [ { "candles": [[ts,o,h,l,c,v], ...] } ]
+    candles = None
+    if isinstance(result, list) and result:
+        first = result[0]
+        if isinstance(first, dict) and "candles" in first:
+            candles = first["candles"]
+        elif isinstance(first, (list, tuple)):
+            # already a flat list of candle rows
+            candles = result
+
+    # Fallback: some responses wrap candles inside a dict instead of a list
+    if candles is None and isinstance(result, dict):
+        for key in ["candles", "data", "result", "records"]:
+            if key in result:
+                candles = result[key]
+                break
+
+    if not candles:
+        return None, (
+            f"IIFL accepted the request (status Ok) for exchange='{exchange}' "
+            "but returned zero candles — likely an empty date range or unsupported interval."
+        )
+
+    return candles, None
+
+
+def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"):
+    """
+    Tries EXCHANGE_FALLBACKS in order. Returns (df, error_log) where
+    error_log is a list of (exchange, reason) for every attempt that failed,
+    so the caller can show exactly what was tried and why it didn't work.
+    """
+    error_log = []
+    result = None
+
+    for exchange in EXCHANGE_FALLBACKS:
+        result, error = _call_historicaldata(instrument_id, exchange, from_date, to_date, interval)
+        if result is not None:
+            error_log.append((exchange, "✅ worked"))
+            break
+        else:
+            error_log.append((exchange, error))
+
+    if result is None:
+        return None, error_log
+
+    rows = []
+    for candle in result:
+        if isinstance(candle, (list, tuple)) and len(candle) >= 6:
+            try:
+                rows.append({
+                    "Date": candle[0],
+                    "Open": float(candle[1]),
+                    "High": float(candle[2]),
+                    "Low": float(candle[3]),
+                    "Close": float(candle[4]),
+                    "Volume": float(candle[5])
+                })
+            except Exception:
+                continue
+        elif isinstance(candle, dict):
+            def get_value(keys):
+                for key in keys:
+                    if key in candle:
+                        return candle[key]
+                return None
+            try:
+                rows.append({
+                    "Date": get_value(["timestamp", "Timestamp", "time", "Time", "date", "Date"]),
+                    "Open": float(get_value(["open", "Open"])),
+                    "High": float(get_value(["high", "High"])),
+                    "Low": float(get_value(["low", "Low"])),
+                    "Close": float(get_value(["close", "Close"])),
+                    "Volume": float(get_value(["volume", "Volume"]))
+                })
+            except Exception:
+                continue
+
+    if not rows:
+        error_log.append(("parsing", "IIFL response received but no OHLCV candles could be parsed."))
+        return None, error_log
+
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
+    return df[["Open", "High", "Low", "Close", "Volume"]], error_log
+
+
+def get_stock_iifl_data(symbol):
+    instrument_id, details = get_instrument_id(symbol)
+    if instrument_id is None:
+        return None, None, details, []
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    from_date = start_date.strftime("%d-%b-%Y")
+    to_date = end_date.strftime("%d-%b-%Y")
+
+    df, error_log = get_iifl_historical_data(instrument_id, from_date, to_date, "1 day")
+
+    return df, instrument_id, details, error_log
+
+
+# ============================================================
+# VCP ANALYSIS
+# ============================================================
+
+def analyze_vcp(df):
+    if df is None or len(df) < 150:
+        return None
+
+    close = df["Close"]
+    volume = df["Volume"]
+
+    ma50 = close.rolling(50).mean()
+    ma150 = close.rolling(150).mean()
+    ma200 = close.rolling(200).mean()
+
+    current_price = float(close.iloc[-1])
+
+    trend_score = 0
+    if current_price > float(ma50.iloc[-1]):
+        trend_score += 1
+    if current_price > float(ma150.iloc[-1]):
+        trend_score += 1
+    if len(ma200.dropna()) > 0 and current_price > float(ma200.iloc[-1]):
+        trend_score += 1
+    if ma50.iloc[-1] > ma150.iloc[-1]:
+        trend_score += 1
+    if len(ma200.dropna()) > 0 and ma150.iloc[-1] > ma200.iloc[-1]:
+        trend_score += 1
+
+    lookback = min(120, len(close) - 1)
+    old_price = float(close.iloc[-lookback])
+    prior_gain = ((current_price / old_price) - 1) * 100
+
+    recent = df.tail(40)
+    recent_high = float(recent["High"].max())
+    recent_low = float(recent["Low"].min())
+    consolidation_range = ((recent_high - recent_low) / recent_high) * 100
+
+    returns = close.pct_change()
+    volatility_20 = returns.tail(20).std()
+    volatility_60 = returns.tail(60).std()
+    volatility_contracting = volatility_20 < volatility_60
+
+    volume_10 = float(volume.tail(10).mean())
+    volume_30 = float(volume.tail(30).mean())
+    volume_ratio = volume_10 / volume_30 if volume_30 > 0 else 1
+    volume_dryup = volume_ratio < 0.85
+
+    last_10 = df.tail(10)
+    high_10 = float(last_10["High"].max())
+    low_10 = float(last_10["Low"].min())
+    range_10 = ((high_10 - low_10) / high_10) * 100
+    tight_action = range_10 < 10
+
+    pivot = recent_high
+    distance_from_pivot = ((pivot - current_price) / pivot) * 100
+    near_pivot = -2 <= distance_from_pivot <= 8
+
+    current_volume = float(volume.iloc[-1])
+    breakout_volume_ratio = current_volume / volume_30 if volume_30 > 0 else 0
+    breakout_volume = breakout_volume_ratio >= 1.5
+
+    score = 0
+    if trend_score >= 4:
+        score += 25
+    elif trend_score >= 3:
+        score += 15
+    if prior_gain >= 20:
+        score += 15
+    elif prior_gain >= 10:
+        score += 8
+    if consolidation_range <= 20:
+        score += 10
+    if consolidation_range <= 12:
+        score += 10
+    if volatility_contracting:
+        score += 10
+    if volume_dryup:
+        score += 10
+    if tight_action:
+        score += 5
+    if near_pivot:
+        score += 10
+    if breakout_volume:
+        score += 5
+
+    if score >= 75:
+        signal = "STRONG VCP"
+    elif score >= 60:
+        signal = "VCP WATCH"
+    elif score >= 45:
+        signal = "DEVELOPING"
+    else:
+        signal = "NO SETUP"
+
+    return {
+        "Price": round(current_price, 2),
+        "Score": score,
+        "Signal": signal,
+        "Trend Score": trend_score,
+        "Prior Gain %": round(prior_gain, 2),
+        "Consolidation %": round(consolidation_range, 2),
+        "10D Range %": round(range_10, 2),
+        "Volume Ratio": round(volume_ratio, 2),
+        "Pivot": round(pivot, 2),
+        "Distance Pivot %": round(distance_from_pivot, 2),
+        "Breakout Vol Ratio": round(breakout_volume_ratio, 2)
+    }
+
+
+# ============================================================
+# SCAN STOCKS
+# ============================================================
+
+def scan_stocks(symbols):
+    results = []
+    progress = st.progress(0)
+    status = st.empty()
+    total = len(symbols)
+
+    for i, symbol in enumerate(symbols):
+        name = symbol.replace(".NS", "")
+        status.write(f"Scanning {name} ({i + 1}/{total})")
+
+        try:
+            df, instrument_id, details, _ = get_stock_iifl_data(symbol)
+            if df is None:
+                progress.progress((i + 1) / total)
+                continue
+
+            analysis = analyze_vcp(df)
+            if analysis:
+                analysis["Stock"] = name
+                analysis["Instrument ID"] = str(instrument_id)
+                results.append(analysis)
+        except Exception:
+            pass
+
+        progress.progress((i + 1) / total)
+
+    progress.empty()
+    status.empty()
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
+
+
+# ============================================================
 # SIDEBAR — CONNECTION
 # ============================================================
 
@@ -145,318 +570,210 @@ st.sidebar.header("🔐 IIFL Connection")
 
 if "iifl_user_session" in st.session_state:
     st.sidebar.success("🟢 IIFL Connected")
-    st.sidebar.write("**Session token (masked):**")
-    st.sidebar.code(mask(st.session_state["iifl_user_session"], keep=6))
 else:
     st.sidebar.error("🔴 IIFL Not Connected")
     st.sidebar.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
-    st.warning("Please log in via the sidebar before running diagnostics.")
-    st.stop()
 
-st.markdown("---")
+st.sidebar.markdown("---")
+st.sidebar.header("🧪 IIFL Data Test")
+
+test_symbol = st.sidebar.selectbox(
+    "Select stock",
+    ["RELIANCE.NS", "TCS.NS", "BEL.NS", "HAL.NS", "TITAN.NS", "HDFCBANK.NS", "INFY.NS"]
+)
+
+test_instrument = st.sidebar.button("1️⃣ Test Instrument")
+test_history = st.sidebar.button("2️⃣ Test Historical Data")
 
 # ============================================================
-# STEP 1 — DOWNLOAD INSTRUMENT MASTER
+# TEST INSTRUMENT
 # ============================================================
 
-st.header("1️⃣ Download IIFL NSEEQ instrument master")
+if test_instrument:
+    if "iifl_user_session" not in st.session_state:
+        st.error("Please login to IIFL first.")
+    else:
+        with st.spinner("Finding IIFL instrument..."):
+            instrument_id, details = get_instrument_id(test_symbol)
 
-if st.button("Download instrument master now") or "instrument_df" in st.session_state:
+        if instrument_id:
+            st.success(f"✅ {test_symbol.replace('.NS', '')} found in IIFL.")
+            st.metric("IIFL Instrument ID", str(instrument_id))
+            with st.expander("View IIFL Instrument Details"):
+                st.json(details)
+        else:
+            st.error("❌ Instrument could not be found.")
 
-    if "instrument_df" not in st.session_state:
-        with st.spinner("Downloading contract master..."):
-            df = None
-            method_used = None
+# ============================================================
+# TEST HISTORICAL DATA — with full transparent error trail
+# ============================================================
 
-            try:
-                r = requests.get(IIFL_NSE_JSON_URL, timeout=30)
-                st.write(f"**JSON endpoint HTTP status:** {r.status_code} — `{IIFL_NSE_JSON_URL}`")
-                if r.status_code == 200:
-                    raw = r.json()
-                    records = None
-                    if isinstance(raw, list):
-                        records = raw
-                    elif isinstance(raw, dict):
-                        for key in ["result", "data", "instruments", "records"]:
-                            if key in raw and isinstance(raw[key], list):
-                                records = raw[key]
-                                break
-                        if records is None:
-                            for value in raw.values():
-                                if isinstance(value, list):
-                                    records = value
-                                    break
-                    if records:
-                        df = pd.DataFrame(records)
-                        method_used = "JSON"
-            except Exception as e:
-                st.warning(f"JSON download failed: {e}")
+if test_history:
+    if "iifl_user_session" not in st.session_state:
+        st.error("Please login to IIFL first.")
+    else:
+        with st.spinner("Finding IIFL instrument..."):
+            instrument_id, details = get_instrument_id(test_symbol)
 
-            if df is None or df.empty:
-                try:
-                    r = requests.get(IIFL_NSE_CSV_URL, timeout=30)
-                    st.write(f"**CSV endpoint HTTP status:** {r.status_code} — `{IIFL_NSE_CSV_URL}`")
-                    if r.status_code == 200:
-                        df = pd.read_csv(StringIO(r.text))
-                        method_used = "CSV"
-                except Exception as e:
-                    st.warning(f"CSV download failed: {e}")
+        if instrument_id:
+            st.success("✅ Instrument found")
 
-            st.session_state["instrument_df"] = df
-            st.session_state["instrument_method"] = method_used
+            with st.spinner("Downloading IIFL historical data..."):
+                historical_df, error_log = get_iifl_historical_data(
+                    instrument_id,
+                    (datetime.now() - timedelta(days=365)).strftime("%d-%b-%Y"),
+                    datetime.now().strftime("%d-%b-%Y"),
+                    "1 day"
+                )
 
-    df = st.session_state.get("instrument_df")
-    method_used = st.session_state.get("instrument_method")
+            with st.expander("🔍 What was tried (exchange fallback log)", expanded=(historical_df is None)):
+                for exchange, outcome in error_log:
+                    if outcome == "✅ worked":
+                        st.success(f"exchange='{exchange}' → {outcome}")
+                    else:
+                        st.warning(f"exchange='{exchange}' → {outcome}")
 
-    if df is None or df.empty:
-        st.error("❌ Could not download the instrument master from either endpoint.")
+            if historical_df is not None:
+                st.success(f"✅ Received {len(historical_df)} daily candles.")
+                st.subheader(f"📊 {test_symbol.replace('.NS', '')} Historical Data")
+                st.dataframe(historical_df.tail(30), use_container_width=True)
+
+                if len(historical_df) >= 150:
+                    analysis = analyze_vcp(historical_df)
+                    if analysis:
+                        st.subheader("📈 VCP Analysis")
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Price", analysis["Price"])
+                        col2.metric("VCP Score", analysis["Score"])
+                        col3.metric("Signal", analysis["Signal"])
+                        st.dataframe(pd.DataFrame([analysis]), use_container_width=True, hide_index=True)
+            else:
+                st.error(
+                    "❌ IIFL returned no historical candles on any exchange code tried. "
+                    "See the fallback log above for IIFL's exact rejection reason on each attempt. "
+                    "If every attempt shows an API-level rejection (not HTTP 401/403), this points to "
+                    "Market Data API not being activated/entitled on your account — confirm with IIFL support."
+                )
+        else:
+            st.error("❌ Instrument could not be found.")
+
+# ============================================================
+# SCANNER SETTINGS
+# ============================================================
+
+st.sidebar.markdown("---")
+st.sidebar.header("📊 Scanner Settings")
+
+score_filter = st.sidebar.slider("Minimum VCP Score", min_value=0, max_value=90, value=45, step=5)
+scan_button = st.sidebar.button("🔍 Scan NSE Stocks")
+
+# ============================================================
+# MAIN SCANNER
+# ============================================================
+
+if scan_button:
+    if "iifl_user_session" not in st.session_state:
+        st.error("🔴 IIFL is not connected.")
         st.stop()
 
-    st.success(f"✅ Instrument master loaded via {method_used} — {len(df)} rows, {len(df.columns)} columns.")
+    with st.spinner("Scanning NSE stocks using IIFL..."):
+        results = scan_stocks(NSE_STOCKS)
 
-    with st.expander("View all column names in the instrument master"):
-        st.code("\n".join(str(c) for c in df.columns))
-
-    with st.expander("Preview first 5 rows"):
-        st.dataframe(df.head(), use_container_width=True)
-
-    # ============================================================
-    # STEP 2 — SEARCH FOR SYMBOL
-    # ============================================================
-
-    st.header("2️⃣ Search for a symbol")
-
-    symbol_input = st.text_input("Enter symbol (e.g. RELIANCE, TCS, BEL)", value="RELIANCE")
-
-    if st.button("Search instrument"):
-        target = symbol_input.upper().strip().replace(".NS", "").replace("-EQ", "").replace("_EQ", "").strip()
-
-        matches = pd.DataFrame()
-        matched_column = None
-
-        for column in df.columns:
-            try:
-                values = df[column].astype(str).str.upper().str.strip()
-                normalized = (
-                    values.str.replace(".NS", "", regex=False)
-                    .str.replace("-EQ", "", regex=False)
-                    .str.replace("_EQ", "", regex=False)
-                    .str.replace(" EQ", "", regex=False)
-                    .str.strip()
-                )
-                hit = df[normalized == target]
-                if not hit.empty:
-                    matches = hit
-                    matched_column = column
-                    break
-            except Exception:
-                continue
-
-        if matches.empty:
-            st.error(f"❌ '{target}' was not found in any column of the instrument master.")
-            st.info("Try a different spelling, or check the column list above for the right field to match on.")
-        else:
-            record = matches.iloc[0].replace({np.nan: None}).to_dict()
-            st.success(f"✅ Found '{target}' — matched on column **{matched_column}**")
-            st.session_state["matched_record"] = record
-            st.session_state["matched_symbol"] = target
-
-            st.subheader("Full matched record")
-            st.json(record)
-
-            # Show every column that looks like it could be an ID
-            id_like_cols = [
-                k for k in record.keys()
-                if any(t in k.lower().replace("_", "").replace(" ", "")
-                       for t in ["instrumentid", "scripcode", "token", "securityid", "id"])
-            ]
-
-            if id_like_cols:
-                st.subheader("Candidate ID fields found in this record")
-                candidates_df = pd.DataFrame(
-                    [{"Field": k, "Value": record[k]} for k in id_like_cols]
-                )
-                st.dataframe(candidates_df, use_container_width=True, hide_index=True)
-            else:
-                st.warning("No field with 'id' in its name was found — inspect the full record above manually.")
-
-    # ============================================================
-    # STEP 3 — TEST HISTORICAL DATA (with full auto-diagnosis)
-    # ============================================================
-
-    st.header("3️⃣ Test historical data")
-
-    if "matched_record" not in st.session_state:
-        st.info("Search for a symbol in Step 2 first.")
+    if results.empty:
+        st.error("❌ No stocks could be processed.")
+        st.info(
+            "Please run '1️⃣ Test Instrument' and '2️⃣ Test Historical Data' first — "
+            "the fallback log there will show IIFL's exact rejection reason."
+        )
     else:
-        record = st.session_state["matched_record"]
-        id_like_cols = [
-            k for k in record.keys()
-            if any(t in k.lower().replace("_", "").replace(" ", "")
-                   for t in ["instrumentid", "scripcode", "token", "securityid", "id"])
-        ]
+        filtered = results[results["Score"] >= score_filter]
 
-        col1, col2 = st.columns(2)
-        with col1:
-            manual_id = st.text_input(
-                "Instrument ID to test (auto-filled with first candidate; edit if needed)",
-                value=str(record.get(id_like_cols[0])) if id_like_cols else ""
-            )
-            exchange_choice = st.selectbox(
-                "Exchange value to send",
-                ["NSEEQ", "NSE", "N"],
-                index=0
-            )
-        with col2:
-            interval_choice = st.selectbox(
-                "Interval",
-                ["1 day", "1 minute", "5 minute", "15 minute", "30 minute", "60 minute"],
-                index=0
-            )
-            days_back = st.number_input("Days of history to request", min_value=5, max_value=730, value=365)
-
-        from_date = (datetime.now() - timedelta(days=int(days_back))).strftime("%d-%b-%Y")
-        to_date = datetime.now().strftime("%d-%b-%Y")
-
-        def call_historical(instrument_id, exchange, interval):
-            headers = get_iifl_headers()
-            url = f"{IIFL_BASE_URL}/marketdata/historicaldata"
-            payload = {
-                "exchange": exchange,
-                "InstrumentId": str(instrument_id),
-                "interval": interval,
-                "fromDate": from_date,
-                "toDate": to_date
-            }
-            safe_headers = dict(headers)
-            safe_headers["Authorization"] = "Bearer " + mask(st.session_state["iifl_user_session"])
-
-            result_block = {
-                "payload": payload,
-                "headers_sent_masked": safe_headers,
-                "url": url
-            }
-
-            try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=30)
-                result_block["http_status"] = resp.status_code
-                result_block["response_headers"] = dict(resp.headers)
-                result_block["raw_text"] = resp.text
-                try:
-                    parsed = resp.json()
-                    result_block["parsed_json"] = parsed
-                    result_block["api_status"] = parsed.get("status")
-                    result_block["api_message"] = parsed.get("message")
-                    result_block["result_len"] = (
-                        len(parsed.get("result")) if isinstance(parsed.get("result"), list) else None
-                    )
-                except Exception:
-                    result_block["parsed_json"] = None
-            except Exception as e:
-                result_block["exception"] = str(e)
-
-            return result_block
-
-        if st.button("▶️ Run single test with the settings above"):
-            with st.spinner("Calling IIFL historicaldata..."):
-                block = call_historical(manual_id, exchange_choice, interval_choice)
-
-            st.subheader("Request sent")
-            st.json({"url": block["url"], "payload": block["payload"], "headers": block["headers_sent_masked"]})
-
-            if "exception" in block:
-                st.error(f"❌ Request failed before a response was received: {block['exception']}")
-            else:
-                st.subheader("Response")
-                st.write("**HTTP status:**", block["http_status"])
-                with st.expander("Response headers"):
-                    st.json(block["response_headers"])
-                st.write("**Raw response body:**")
-                st.code(block["raw_text"])
-
-                if block.get("parsed_json") is not None:
-                    st.write(f"**API status:** `{block['api_status']}`  |  **message:** `{block['api_message']}`  |  **candles returned:** {block['result_len']}")
-
-                # ---- Diagnosis ----
-                st.subheader("🩺 Diagnosis")
-                if "exception" in block:
-                    st.error("Network-level failure — check internet access / firewall / Streamlit Cloud egress.")
-                elif block["http_status"] == 401:
-                    st.error("HTTP 401 — the session token is invalid or expired. Re-login via the sidebar.")
-                elif block["http_status"] == 403:
-                    st.error("HTTP 403 — the account/API key may not be entitled to market data, or IP is blocked.")
-                elif block["http_status"] != 200:
-                    st.error(f"Unexpected HTTP status {block['http_status']} — see raw response above.")
-                elif block.get("api_status") not in ("Ok", "ok", True):
-                    st.error(
-                        "The HTTP call succeeded but IIFL's own API returned a failure status. "
-                        "This almost always means the **InstrumentId / exchange combination is wrong** "
-                        "for this endpoint, even if it's the correct ID in the contract master. "
-                        "Try the batch test below — it tries every candidate ID and every exchange code "
-                        "automatically and tells you which combination actually works."
-                    )
-                elif block.get("result_len") == 0:
-                    st.warning(
-                        "IIFL accepted the request (status Ok) but returned zero candles. "
-                        "This usually means the date range has no trading data (e.g. dates in the future, "
-                        "or the instrument was newly listed) or the interval string isn't supported for this instrument."
-                    )
-                else:
-                    st.success(f"✅ Working combination — {block['result_len']} candles returned.")
-
-        st.markdown("---")
-        st.subheader("🔁 Auto batch test (recommended)")
-        st.caption(
-            "Tries every ID-like field found in the matched record against every likely exchange code. "
-            "Reports which exact combination IIFL accepts."
+        st.success(
+            f"✅ Scan completed — {len(results)} stocks processed, "
+            f"{len(filtered)} passed the filter."
         )
 
-        if st.button("▶️ Run batch test across all candidate IDs and exchanges"):
-            if not id_like_cols:
-                st.error("No candidate ID fields were found in the matched record — nothing to test.")
-            else:
-                exchanges_to_try = ["NSEEQ", "NSE", "N"]
-                rows = []
-                progress = st.progress(0)
-                total = len(id_like_cols) * len(exchanges_to_try)
-                i = 0
+        st.subheader("🏆 Top VCP Setups")
 
-                for field in id_like_cols:
-                    candidate_id = record.get(field)
-                    if candidate_id in (None, "", "nan"):
-                        continue
-                    for exch in exchanges_to_try:
-                        i += 1
-                        progress.progress(i / total)
-                        block = call_historical(candidate_id, exch, interval_choice)
-                        rows.append({
-                            "Field": field,
-                            "InstrumentId tried": candidate_id,
-                            "Exchange tried": exch,
-                            "HTTP status": block.get("http_status", "ERR"),
-                            "API status": block.get("api_status"),
-                            "API message": block.get("api_message"),
-                            "Candles returned": block.get("result_len"),
-                            "Working?": "✅ YES" if block.get("result_len") not in (None, 0) and block.get("api_status") in ("Ok", "ok", True) else "❌ no"
-                        })
+        if filtered.empty:
+            st.warning("No stocks currently meet the selected VCP score.")
+        else:
+            columns = [
+                "Stock", "Price", "Score", "Signal", "Trend Score", "Prior Gain %",
+                "Consolidation %", "10D Range %", "Volume Ratio", "Pivot",
+                "Distance Pivot %", "Breakout Vol Ratio", "Instrument ID"
+            ]
+            columns = [c for c in columns if c in filtered.columns]
 
-                progress.empty()
-                results_df = pd.DataFrame(rows)
-                st.dataframe(results_df, use_container_width=True, hide_index=True)
+            st.dataframe(filtered[columns], use_container_width=True, hide_index=True)
 
-                working = results_df[results_df["Working?"] == "✅ YES"]
-                if not working.empty:
-                    best = working.iloc[0]
-                    st.success(
-                        f"✅ Found a working combination: field **{best['Field']}** = "
-                        f"`{best['InstrumentId tried']}`, exchange = `{best['Exchange tried']}`. "
-                        f"Update `find_instrument_id()` in your scanner app to prefer the `{best['Field']}` "
-                        f"column, and set the historical-data payload's `exchange` to `{best['Exchange tried']}`."
-                    )
-                else:
-                    st.error(
-                        "❌ None of the candidate IDs/exchanges worked. This points to one of: "
-                        "(1) the session token doesn't have market-data entitlement, "
-                        "(2) the account needs market-data API activation with IIFL, or "
-                        "(3) the interval string used isn't supported — try switching the Interval dropdown above and re-running."
-                    )
+            csv = filtered.to_csv(index=False)
+            st.download_button(
+                "⬇️ Download VCP Watchlist CSV",
+                data=csv,
+                file_name="iifl_vcp_watchlist.csv",
+                mime="text/csv"
+            )
+
+        with st.expander("📋 View all scanned stocks"):
+            st.dataframe(results, use_container_width=True, hide_index=True)
+
+else:
+    if "iifl_user_session" in st.session_state:
+        st.success("🟢 IIFL Connected")
+        st.markdown(
+            """
+### IIFL Connection Ready
+
+Use the sidebar in this order:
+
+**1️⃣ Test Instrument** — verify a symbol maps to an IIFL `instrumentId`.
+
+**2️⃣ Test Historical Data** — verify IIFL returns daily OHLCV candles.
+If this fails, expand the fallback log to see IIFL's exact rejection
+reason for each exchange code tried.
+
+**3️⃣ Scan NSE Stocks** — once the test works, run the VCP scanner.
+"""
+        )
+    else:
+        st.warning("🔴 Please login to IIFL.")
+        st.markdown(
+            """
+### How to start
+
+1. Click **🔑 Login with IIFL**
+2. Complete your IIFL login.
+3. IIFL redirects back to this app.
+4. The app generates the IIFL user session.
+5. Test RELIANCE.
+6. Run the VCP scanner.
+"""
+        )
+
+    st.markdown(
+        """
+### 📈 VCP Scanner
+
+The scanner evaluates:
+
+- Price vs 50/150/200-day moving averages
+- Moving-average alignment
+- Prior price advance
+- 40-day consolidation
+- Volatility contraction
+- Volume dry-up
+- 10-day price tightness
+- Pivot proximity
+- Breakout volume
+
+The conditions are combined into a VCP score.
+"""
+    )
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown("---")
+st.caption("Educational tool only. Not investment advice.")
