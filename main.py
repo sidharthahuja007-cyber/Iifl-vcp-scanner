@@ -860,6 +860,19 @@ def get_iifl_historical_data(
     to_date,
     interval="1 day"
 ):
+    st.write("=== Payload ===")
+st.json(payload)
+
+st.write("=== Headers ===")
+st.json({
+    "Authorization": "Bearer ***",
+    "Content-Type": "application/json"
+})
+st.write("HTTP Status Code")
+st.write(response.status_code)
+
+st.write("Raw Response")
+st.code(response.text)
 
     headers = (
         get_iifl_headers()
