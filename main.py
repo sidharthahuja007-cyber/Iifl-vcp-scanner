@@ -4,47 +4,53 @@ import numpy as np
 import requests
 import hashlib
 import json
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from io import StringIO
 
 # ============================================================
-# PAGE CONFIG
+# PAGE CONFIG + THEME
 # ============================================================
 
 st.set_page_config(
-    page_title="IIFL VCP Scanner",
+    page_title="IIFL VCP Terminal",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("📈 IIFL VCP Stock Scanner")
-
-st.caption(
-    "Minervini-style Volume Contraction Pattern scanner "
-    "using IIFL historical market data"
-)
+st.markdown("""
+<style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #161b22; border: 1px solid #262d38;
+                border-radius: 10px; padding: 12px 16px; }
+    div[data-testid="stMetricValue"] { font-size: 1.4rem; }
+    .block-container { padding-top: 1.5rem; }
+    .stButton>button { border-radius: 6px; }
+    .signal-badge {
+        display: inline-block; padding: 3px 10px; border-radius: 12px;
+        font-size: 0.75rem; font-weight: 600; margin-right: 4px;
+    }
+    .badge-strong { background:#0d3b28; color:#3fd68c; }
+    .badge-watch  { background:#3a2e05; color:#e0b23c; }
+    .badge-dev    { background:#1c2b4a; color:#5b8def; }
+    .badge-none   { background:#2a2a2a; color:#888; }
+    .badge-breakout { background:#4a1520; color:#ff5c7a; }
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================
 # IIFL CONFIGURATION
 # ============================================================
 
 IIFL_BASE_URL = "https://api.iiflcapital.com/v1"
-
-IIFL_LOGIN_URL = (
-    "https://markets.iiflcapital.com/"
-    "?v=1&appkey=iDCmottF6T8VZr1"
-)
-
+IIFL_LOGIN_URL = "https://markets.iiflcapital.com/?v=1&appkey=iDCmottF6T8VZr1"
 IIFL_NSE_JSON_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.json"
 IIFL_NSE_CSV_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
-
-# Exchange codes to try, in priority order, when a historical-data
-# call is rejected at the API level. Per IIFL docs the primary
-# value is "NSEEQ"; the others are kept as automatic fallbacks in
-# case of an account-specific mapping difference.
 EXCHANGE_FALLBACKS = ["NSEEQ", "NSE", "N"]
 
-NSE_STOCKS = [
+FO_STOCKS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS",
     "SBIN.NS", "BHARTIARTL.NS", "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS",
     "HINDUNILVR.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "BAJFINANCE.NS",
@@ -58,86 +64,41 @@ NSE_STOCKS = [
     "APOLLOTYRE.NS", "ASHOKLEY.NS", "ASIANPAINT.NS", "ASTRAL.NS", "ATUL.NS",
     "AUBANK.NS", "BAJAJ-AUTO.NS", "BALKRISIND.NS", "BALRAMCHIN.NS",
     "BANDHANBNK.NS", "BANKBARODA.NS", "BATAINDIA.NS", "BERGEPAINT.NS",
-    "BHARATFORG.NS", "BHARTIHEXA.NS", "BIOCON.NS", "BOSCHLTD.NS",
-    "BPCL.NS", "BRITANNIA.NS", "BSOFT.NS", "CAMS.NS", "CANBK.NS",
-    "CANFINHOME.NS", "CHAMBLFERT.NS", "CHOLAFIN.NS", "CIPLA.NS", "COALINDIA.NS",
-    "COFORGE.NS", "COLPAL.NS", "CONCOR.NS", "COROMANDEL.NS", "CROMPTON.NS",
-    "CUB.NS", "CUMMINSIND.NS", "DABUR.NS", "DALBHARAT.NS", "DEEPAKNTR.NS",
-    "DELHIVERY.NS", "DELTACORP.NS", "DIVISLAB.NS", "DLF.NS", "DRREDDY.NS",
-    "EICHERMOT.NS", "ESCORTS.NS", "EXIDEIND.NS", "FEDERALBNK.NS",
-    "GAIL.NS", "GLENMARK.NS", "GMRINFRA.NS", "GNFC.NS", "GODREJCP.NS",
-    "GODREJPROP.NS", "GRANULES.NS", "GRASIM.NS", "GUJGASLTD.NS",
-    "HAVELLS.NS", "HCLTECH.NS", "HDFCAMC.NS", "HDFCLIFE.NS",
-    "HEROMOTOCO.NS", "HFCL.NS", "HINDALCO.NS", "HINDCOPPER.NS",
-    "HINDPETRO.NS", "HONAUT.NS", "IBULHSGFIN.NS", "ICICIGI.NS",
-    "ICICIPRULI.NS", "IDEA.NS", "IDFC.NS", "IDFCFIRSTB.NS", "IEX.NS",
-    "IGL.NS", "INDHOTEL.NS", "INDIACEM.NS", "INDIAMART.NS", "INDIGO.NS",
-    "INDUSINDBK.NS", "INDUSTOWER.NS", "INTELLECT.NS", "IOC.NS", "IPCALAB.NS",
-    "IRCTC.NS", "IRFC.NS", "ITC.NS", "JINDALSTEL.NS", "JKCEMENT.NS",
-    "JSWENERGY.NS", "JSWSTEEL.NS", "JUBLPHARMA.NS", "KALYANKJIL.NS",
-    "KEI.NS", "KOTAKBANK.NS", "L&TFH.NS", "LALPATHLAB.NS", "LAURUSLABS.NS",
-    "LICHSGFIN.NS", "LICI.NS", "LODHA.NS", "LTIM.NS", "LTTS.NS",
-    "M&M.NS", "M&MFIN.NS", "MANAPPURAM.NS", "MARICO.NS", "MCDOWELL-N.NS",
-    "METROPOLIS.NS", "MFSL.NS", "MGL.NS", "MOTHERSON.NS", "MPHASIS.NS",
-    "NATIONALUM.NS", "NAUKRI.NS", "NAVINFLUOR.NS", "NBCC.NS", "NESTLEIND.NS",
-    "NMDC.NS", "OBEROIRLTY.NS", "OFSS.NS", "OIL.NS", "ONGC.NS", "PAGEIND.NS",
-    "PATANJALI.NS", "PAYTM.NS", "PEL.NS", "PETRONET.NS", "PFC.NS",
-    "PHOENIXLTD.NS", "PIIND.NS", "PNB.NS", "PNBHOUSING.NS", "PVRINOX.NS",
-    "RAMCOCEM.NS", "RBLBANK.NS", "RECLTD.NS", "SAIL.NS", "SBICARD.NS",
-    "SBILIFE.NS", "SHREECEM.NS", "SIEMENS.NS", "SONACOMS.NS", "SUNTV.NS",
-    "SYNGENE.NS", "TATACHEM.NS", "TATACOMM.NS", "TATACONSUM.NS",
+    "BHARATFORG.NS", "BIOCON.NS", "BOSCHLTD.NS", "BPCL.NS", "BRITANNIA.NS",
+    "CAMS.NS", "CANBK.NS", "CHOLAFIN.NS", "COALINDIA.NS", "COLPAL.NS",
+    "CONCOR.NS", "COROMANDEL.NS", "CROMPTON.NS", "CUMMINSIND.NS", "DABUR.NS",
+    "DALBHARAT.NS", "DELHIVERY.NS", "DLF.NS", "EICHERMOT.NS", "ESCORTS.NS",
+    "EXIDEIND.NS", "FEDERALBNK.NS", "GAIL.NS", "GLENMARK.NS", "GMRINFRA.NS",
+    "GODREJCP.NS", "GODREJPROP.NS", "GRASIM.NS", "HAVELLS.NS", "HCLTECH.NS",
+    "HDFCAMC.NS", "HDFCLIFE.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HINDPETRO.NS",
+    "ICICIGI.NS", "ICICIPRULI.NS", "IDFCFIRSTB.NS", "IEX.NS", "IGL.NS",
+    "INDHOTEL.NS", "INDIAMART.NS", "INDIGO.NS", "INDUSINDBK.NS", "INDUSTOWER.NS",
+    "IOC.NS", "IRCTC.NS", "IRFC.NS", "JINDALSTEL.NS", "JSWENERGY.NS",
+    "JSWSTEEL.NS", "KALYANKJIL.NS", "L&TFH.NS", "LICHSGFIN.NS", "LICI.NS",
+    "LODHA.NS", "LTIM.NS", "M&M.NS", "M&MFIN.NS", "MARICO.NS", "MFSL.NS",
+    "MOTHERSON.NS", "MPHASIS.NS", "NATIONALUM.NS", "NAUKRI.NS", "NESTLEIND.NS",
+    "NMDC.NS", "OBEROIRLTY.NS", "OFSS.NS", "ONGC.NS", "PAGEIND.NS", "PATANJALI.NS",
+    "PEL.NS", "PETRONET.NS", "PFC.NS", "PHOENIXLTD.NS", "PIIND.NS", "PNB.NS",
+    "RECLTD.NS", "SAIL.NS", "SBICARD.NS", "SBILIFE.NS", "SHREECEM.NS",
+    "SIEMENS.NS", "SUNTV.NS", "TATACHEM.NS", "TATACOMM.NS", "TATACONSUM.NS",
     "TATAMOTORS.NS", "TATAPOWER.NS", "TATASTEEL.NS", "TECHM.NS", "TIINDIA.NS",
     "TORNTPHARM.NS", "TORNTPOWER.NS", "TVSMOTOR.NS", "UBL.NS", "UPL.NS",
-    "VBL.NS", "VEDL.NS", "VOLTAS.NS", "WHIRLPOOL.NS", "WIPRO.NS", "ZEEL.NS",
-    "ZOMATO.NS"
+    "VBL.NS", "VEDL.NS", "VOLTAS.NS", "WIPRO.NS", "ZOMATO.NS"
 ]
-
-# Remove duplicates while preserving order
-NSE_STOCKS = list(dict.fromkeys(NSE_STOCKS))
+FO_STOCKS = list(dict.fromkeys(FO_STOCKS))
 
 
-@st.cache_data(ttl=86400)
-def fetch_nse_fo_stock_list():
-    """
-    Attempts to fetch the live NSE F&O eligible stock list.
-    NSE frequently blocks non-browser requests (esp. from cloud IPs like
-    Streamlit Cloud), so this may fail — that's expected and handled by
-    the caller falling back to the static NSE_STOCKS list above.
-    """
-    url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": "text/csv,*/*",
-        "Referer": "https://www.nseindia.com/"
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200:
-            return None
-        df = pd.read_csv(StringIO(r.text))
-        df.columns = [c.strip() for c in df.columns]
-        symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
-        if symbol_col is None:
-            return None
-        symbols = (
-            df[symbol_col]
-            .astype(str)
-            .str.strip()
-            .replace("", np.nan)
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        symbols = [s for s in symbols if s.isupper() and s.isalnum() is False or s.isalpha() or "-" in s or "&" in s]
-        return sorted(set(f"{s}.NS" for s in symbols if s and s != "SYMBOL"))
-    except Exception:
-        return None
+def mask(token, keep=4):
+    if not token:
+        return "None"
+    token = str(token)
+    if len(token) <= keep * 2:
+        return "*" * len(token)
+    return token[:keep] + "..." + token[-keep:]
+
 
 # ============================================================
-# IIFL LOGIN / USER SESSION
+# AUTH
 # ============================================================
 
 def get_iifl_user_session(authcode, clientid):
@@ -146,45 +107,26 @@ def get_iifl_user_session(authcode, clientid):
     except Exception:
         st.error("IIFL_APP_SECRET is missing from Streamlit Secrets.")
         return None
-
     try:
         checksum_string = str(clientid) + str(authcode) + str(app_secret)
         checksum = hashlib.sha256(checksum_string.encode("utf-8")).hexdigest()
-
         response = requests.post(
-            f"{IIFL_BASE_URL}/getusersession",
-            json={"checkSum": checksum},
-            timeout=30
+            f"{IIFL_BASE_URL}/getusersession", json={"checkSum": checksum}, timeout=30
         )
-
         if response.status_code != 200:
             st.error(f"IIFL login HTTP error: {response.status_code}")
-            st.code(response.text)
             return None
-
         data = response.json()
-
         if data.get("status") == "Ok":
             session = data.get("userSession")
             if session:
                 return session
-
         st.error("IIFL did not return a user session.")
-        safe_data = dict(data)
-        for key in ["userSession", "accessToken", "token"]:
-            if key in safe_data:
-                safe_data[key] = "***HIDDEN***"
-        st.json(safe_data)
         return None
-
     except Exception as e:
         st.error(f"IIFL authentication error: {e}")
         return None
 
-
-# ============================================================
-# PROCESS REDIRECT
-# ============================================================
 
 query_params = st.query_params
 authcode = query_params.get("authcode") or query_params.get("authCode")
@@ -196,7 +138,6 @@ if authcode and clientid and "iifl_user_session" not in st.session_state:
     if user_session:
         st.session_state["iifl_user_session"] = user_session
         st.session_state["iifl_client_id"] = clientid
-        st.session_state["iifl_connected"] = True
         st.query_params.clear()
         st.rerun()
 
@@ -213,15 +154,15 @@ def get_iifl_headers():
 
 
 # ============================================================
-# LOAD IIFL NSE INSTRUMENT MASTER
+# INSTRUMENT MASTER + LOOKUP
 # ============================================================
 
 @st.cache_data(ttl=86400)
 def load_iifl_nse_instruments():
     try:
-        response = requests.get(IIFL_NSE_JSON_URL, timeout=30)
-        if response.status_code == 200:
-            raw = response.json()
+        r = requests.get(IIFL_NSE_JSON_URL, timeout=30)
+        if r.status_code == 200:
+            raw = r.json()
             records = None
             if isinstance(raw, list):
                 records = raw
@@ -230,58 +171,40 @@ def load_iifl_nse_instruments():
                     if key in raw and isinstance(raw[key], list):
                         records = raw[key]
                         break
-                if records is None:
-                    for value in raw.values():
-                        if isinstance(value, list):
-                            records = value
-                            break
             if records:
                 df = pd.DataFrame(records)
                 if not df.empty:
                     return df
     except Exception:
         pass
-
     try:
-        response = requests.get(IIFL_NSE_CSV_URL, timeout=30)
-        if response.status_code == 200:
-            df = pd.read_csv(StringIO(response.text))
+        r = requests.get(IIFL_NSE_CSV_URL, timeout=30)
+        if r.status_code == 200:
+            df = pd.read_csv(StringIO(r.text))
             if not df.empty:
                 return df
     except Exception:
         pass
-
     return None
 
 
-# ============================================================
-# SYMBOL / INSTRUMENT LOOKUP
-# ============================================================
-
 def normalize_symbol(symbol):
     symbol = str(symbol).upper().strip()
-    return (
-        symbol.replace(".NS", "").replace(".NSE", "")
-        .replace("-EQ", "").replace("_EQ", "").replace(" EQ", "").strip()
-    )
+    return (symbol.replace(".NS", "").replace(".NSE", "")
+            .replace("-EQ", "").replace("_EQ", "").replace(" EQ", "").strip())
 
 
 def find_instrument_id(record):
     if not isinstance(record, dict):
         return None
-    possible_keys = [
-        "instrumentId", "InstrumentId", "instrumentID", "InstrumentID",
-        "instrument_id", "Instrument_Id", "NSEInstrumentId", "nseInstrumentId",
-        "securityId", "SecurityId", "scripCode", "ScripCode", "token", "Token"
-    ]
-    for key in possible_keys:
+    for key in ["instrumentId", "InstrumentId", "instrumentID", "instrument_id",
+                "NSEInstrumentId", "securityId", "scripCode", "token"]:
         if key in record:
             value = record[key]
             if value is not None and str(value).strip() not in ["", "nan", "None"]:
                 return str(value)
     for key, value in record.items():
-        key_clean = str(key).lower().replace("_", "").replace(" ", "")
-        if "instrumentid" in key_clean and value is not None:
+        if "instrumentid" in str(key).lower().replace("_", "") and value is not None:
             return str(value)
     return None
 
@@ -289,59 +212,39 @@ def find_instrument_id(record):
 def find_iifl_instrument(symbol):
     instruments = load_iifl_nse_instruments()
     if instruments is None:
-        st.error("❌ IIFL NSE instrument master could not be downloaded.")
         return None
-
     target = normalize_symbol(symbol)
-
     for column in instruments.columns:
         try:
             values = instruments[column].astype(str).str.upper().str.strip()
-            normalized_values = (
-                values.str.replace(".NS", "", regex=False)
-                .str.replace("-EQ", "", regex=False)
-                .str.replace("_EQ", "", regex=False)
-                .str.replace(" EQ", "", regex=False)
-                .str.strip()
-            )
-            match = instruments[normalized_values == target]
+            normalized = (values.str.replace(".NS", "", regex=False)
+                          .str.replace("-EQ", "", regex=False)
+                          .str.replace("_EQ", "", regex=False)
+                          .str.replace(" EQ", "", regex=False).str.strip())
+            match = instruments[normalized == target]
             if not match.empty:
                 return match.iloc[0]
         except Exception:
             continue
-
-    st.error(f"❌ {target} was not found in the IIFL NSE instrument master.")
-    return None
-
-
-def get_instrument_details(symbol):
-    row = find_iifl_instrument(symbol)
-    if row is None:
-        return None
-    if isinstance(row, pd.Series):
-        return row.replace({np.nan: None}).to_dict()
-    if isinstance(row, dict):
-        return row
     return None
 
 
 def get_instrument_id(symbol):
-    details = get_instrument_details(symbol)
-    if details is None:
+    row = find_iifl_instrument(symbol)
+    if row is None:
         return None, None
-    instrument_id = find_instrument_id(details)
-    return instrument_id, details
+    details = row.replace({np.nan: None}).to_dict()
+    return find_instrument_id(details), details
 
 
 # ============================================================
-# HISTORICAL DATA — with automatic exchange fallback + transparent errors
+# HISTORICAL DATA (uses the confirmed-correct lowercase key)
 # ============================================================
 
 def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
     headers = get_iifl_headers()
     if headers is None:
         return None, "IIFL session is not available."
-
     url = f"{IIFL_BASE_URL}/marketdata/historicaldata"
     payload = {
         "exchange": exchange,
@@ -350,55 +253,40 @@ def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
         "fromDate": from_date,
         "toDate": to_date
     }
-
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
     except Exception as e:
-        return None, f"Network error calling IIFL: {e}"
+        return None, f"Network error: {e}"
 
     if response.status_code == 401:
-        return None, "HTTP 401 — session token invalid or expired. Please log in again."
+        return None, "HTTP 401 — session expired, please log in again."
     if response.status_code == 403:
-        return None, (
-            "HTTP 403 — access denied. This usually means Market Data API is not "
-            "activated/entitled on this account or app key. Contact IIFL support."
-        )
+        return None, "HTTP 403 — access denied (check Market Data entitlement)."
     if response.status_code != 200:
-        return None, f"IIFL historical-data HTTP error: {response.status_code}\n{response.text}"
+        return None, f"HTTP {response.status_code}: {response.text}"
 
     try:
         data = response.json()
     except Exception:
-        return None, f"IIFL returned an invalid (non-JSON) response:\n{response.text}"
+        return None, f"Invalid JSON: {response.text}"
 
     if data.get("status") not in ("Ok", "ok", True):
-        message = data.get("message", "Unknown error")
-        return None, (
-            f"IIFL rejected the request for exchange='{exchange}': "
-            f"status='{data.get('status')}', message='{message}'"
-        )
+        return None, f"IIFL rejected: {data.get('message')}"
 
     result = data.get("result")
-
-    # The IIFL historicaldata response is documented as a string, not JSON,
-    # in some deployments — handle both.
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except Exception:
             pass
 
-    # Documented shape: result -> [ { "candles": [[ts,o,h,l,c,v], ...] } ]
     candles = None
     if isinstance(result, list) and result:
         first = result[0]
         if isinstance(first, dict) and "candles" in first:
             candles = first["candles"]
         elif isinstance(first, (list, tuple)):
-            # already a flat list of candle rows
             candles = result
-
-    # Fallback: some responses wrap candles inside a dict instead of a list
     if candles is None and isinstance(result, dict):
         for key in ["candles", "data", "result", "records"]:
             if key in result:
@@ -406,30 +294,20 @@ def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
                 break
 
     if not candles:
-        return None, (
-            f"IIFL accepted the request (status Ok) for exchange='{exchange}' "
-            "but returned zero candles — likely an empty date range or unsupported interval."
-        )
+        return None, f"Zero candles returned for exchange='{exchange}'."
 
     return candles, None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"):
-    """
-    Tries EXCHANGE_FALLBACKS in order. Returns (df, error_log) where
-    error_log is a list of (exchange, reason) for every attempt that failed,
-    so the caller can show exactly what was tried and why it didn't work.
-    """
     error_log = []
     result = None
-
     for exchange in EXCHANGE_FALLBACKS:
         result, error = _call_historicaldata(instrument_id, exchange, from_date, to_date, interval)
         if result is not None:
-            error_log.append((exchange, "✅ worked"))
             break
-        else:
-            error_log.append((exchange, error))
+        error_log.append((exchange, error))
 
     if result is None:
         return None, error_log
@@ -439,58 +317,175 @@ def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"
         if isinstance(candle, (list, tuple)) and len(candle) >= 6:
             try:
                 rows.append({
-                    "Date": candle[0],
-                    "Open": float(candle[1]),
-                    "High": float(candle[2]),
-                    "Low": float(candle[3]),
-                    "Close": float(candle[4]),
-                    "Volume": float(candle[5])
+                    "Date": candle[0], "Open": float(candle[1]), "High": float(candle[2]),
+                    "Low": float(candle[3]), "Close": float(candle[4]), "Volume": float(candle[5])
                 })
             except Exception:
                 continue
         elif isinstance(candle, dict):
-            def get_value(keys):
-                for key in keys:
-                    if key in candle:
-                        return candle[key]
+            def gv(keys):
+                for k in keys:
+                    if k in candle:
+                        return candle[k]
                 return None
             try:
                 rows.append({
-                    "Date": get_value(["timestamp", "Timestamp", "time", "Time", "date", "Date"]),
-                    "Open": float(get_value(["open", "Open"])),
-                    "High": float(get_value(["high", "High"])),
-                    "Low": float(get_value(["low", "Low"])),
-                    "Close": float(get_value(["close", "Close"])),
-                    "Volume": float(get_value(["volume", "Volume"]))
+                    "Date": gv(["timestamp", "time", "date"]),
+                    "Open": float(gv(["open", "Open"])), "High": float(gv(["high", "High"])),
+                    "Low": float(gv(["low", "Low"])), "Close": float(gv(["close", "Close"])),
+                    "Volume": float(gv(["volume", "Volume"]))
                 })
             except Exception:
                 continue
 
     if not rows:
-        error_log.append(("parsing", "IIFL response received but no OHLCV candles could be parsed."))
-        return None, error_log
+        return None, [("parsing", "Candles received but could not be parsed.")]
 
     df = pd.DataFrame(rows)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
     df = df[~df.index.duplicated(keep="last")]
+    return df[["Open", "High", "Low", "Close", "Volume"]], []
 
-    return df[["Open", "High", "Low", "Close", "Volume"]], error_log
 
-
-def get_stock_iifl_data(symbol):
+def get_stock_daily_data(symbol, days=400):
     instrument_id, details = get_instrument_id(symbol)
     if instrument_id is None:
-        return None, None, details, []
-
+        return None, None, []
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
-    from_date = start_date.strftime("%d-%b-%Y")
-    to_date = end_date.strftime("%d-%b-%Y")
+    start_date = end_date - timedelta(days=days)
+    df, errors = get_iifl_historical_data(
+        instrument_id, start_date.strftime("%d-%b-%Y"), end_date.strftime("%d-%b-%Y"), "1 day"
+    )
+    return df, instrument_id, errors
 
-    df, error_log = get_iifl_historical_data(instrument_id, from_date, to_date, "1 day")
 
-    return df, instrument_id, details, error_log
+def get_iifl_live_quote(instrument_id, exchange="NSEEQ"):
+    headers = get_iifl_headers()
+    if headers is None:
+        return None, "No session."
+    url = f"{IIFL_BASE_URL}/marketdata/marketquotes"
+    payload = [{"exchange": exchange, "instrumentId": str(instrument_id)}]
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+    except Exception as e:
+        return None, str(e)
+    if response.status_code != 200:
+        return None, f"HTTP {response.status_code}"
+    try:
+        data = response.json()
+    except Exception:
+        return None, "Invalid JSON"
+    if data.get("status") not in ("Ok", "ok", True):
+        return None, data.get("message")
+    result = data.get("result")
+    if isinstance(result, list) and result:
+        return result[0], None
+    return None, "No data"
+
+
+# ============================================================
+# TECHNICAL INDICATORS
+# ============================================================
+
+def calc_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+
+def calc_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def calc_atr(df, period=14):
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low, (high - prev_close).abs(), (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+def add_indicators(df):
+    df = df.copy()
+    df["EMA21"] = calc_ema(df["Close"], 21)
+    df["EMA50"] = calc_ema(df["Close"], 50)
+    df["EMA150"] = calc_ema(df["Close"], 150)
+    df["EMA200"] = calc_ema(df["Close"], 200)
+    df["RSI"] = calc_rsi(df["Close"], 14)
+    macd, signal, hist = calc_macd(df["Close"])
+    df["MACD"] = macd
+    df["MACD_Signal"] = signal
+    df["MACD_Hist"] = hist
+    df["ATR"] = calc_atr(df, 14)
+    return df
+
+
+# ============================================================
+# SUPPORT / RESISTANCE
+# ============================================================
+
+def find_support_resistance(df, window=5, tolerance_pct=1.5, max_levels=5):
+    if df is None or len(df) < window * 2 + 1:
+        return [], []
+    highs, lows = df["High"].values, df["Low"].values
+    n = len(df)
+    swing_highs, swing_lows = [], []
+    for i in range(window, n - window):
+        wh = highs[i - window: i + window + 1]
+        wl = lows[i - window: i + window + 1]
+        if highs[i] == wh.max():
+            swing_highs.append(float(highs[i]))
+        if lows[i] == wl.min():
+            swing_lows.append(float(lows[i]))
+
+    def cluster(levels):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        clusters = [[levels[0]]]
+        for lvl in levels[1:]:
+            avg = np.mean(clusters[-1])
+            if abs(lvl - avg) / avg * 100 <= tolerance_pct:
+                clusters[-1].append(lvl)
+            else:
+                clusters.append([lvl])
+        return [(float(np.mean(c)), len(c)) for c in clusters]
+
+    resistance = sorted(cluster(swing_highs), key=lambda x: -x[1])[:max_levels]
+    support = sorted(cluster(swing_lows), key=lambda x: -x[1])[:max_levels]
+    return support, resistance
+
+
+def detect_breakout(df, resistance_levels):
+    if df is None or len(df) < 31 or not resistance_levels:
+        return False, None
+    close, prev_close = df["Close"].iloc[-1], df["Close"].iloc[-2]
+    volume = df["Volume"].iloc[-1]
+    avg_volume = df["Volume"].tail(30).mean()
+    for price, touches in resistance_levels:
+        if prev_close <= price < close:
+            return True, {
+                "level": price, "touches": touches,
+                "volume_confirmed": bool(volume > avg_volume * 1.3),
+                "volume_ratio": round(volume / avg_volume, 2) if avg_volume else 0
+            }
+    return False, None
 
 
 # ============================================================
@@ -501,50 +496,33 @@ def analyze_vcp(df):
     if df is None or len(df) < 150:
         return None
 
-    close = df["Close"]
-    volume = df["Volume"]
-
-    ma50 = close.rolling(50).mean()
-    ma150 = close.rolling(150).mean()
-    ma200 = close.rolling(200).mean()
-
+    close, volume = df["Close"], df["Volume"]
+    ma50, ma150, ma200 = close.rolling(50).mean(), close.rolling(150).mean(), close.rolling(200).mean()
     current_price = float(close.iloc[-1])
 
     trend_score = 0
-    if current_price > float(ma50.iloc[-1]):
-        trend_score += 1
-    if current_price > float(ma150.iloc[-1]):
-        trend_score += 1
-    if len(ma200.dropna()) > 0 and current_price > float(ma200.iloc[-1]):
-        trend_score += 1
-    if ma50.iloc[-1] > ma150.iloc[-1]:
-        trend_score += 1
-    if len(ma200.dropna()) > 0 and ma150.iloc[-1] > ma200.iloc[-1]:
-        trend_score += 1
+    if current_price > float(ma50.iloc[-1]): trend_score += 1
+    if current_price > float(ma150.iloc[-1]): trend_score += 1
+    if len(ma200.dropna()) > 0 and current_price > float(ma200.iloc[-1]): trend_score += 1
+    if ma50.iloc[-1] > ma150.iloc[-1]: trend_score += 1
+    if len(ma200.dropna()) > 0 and ma150.iloc[-1] > ma200.iloc[-1]: trend_score += 1
 
     lookback = min(120, len(close) - 1)
-    old_price = float(close.iloc[-lookback])
-    prior_gain = ((current_price / old_price) - 1) * 100
+    prior_gain = ((current_price / float(close.iloc[-lookback])) - 1) * 100
 
     recent = df.tail(40)
-    recent_high = float(recent["High"].max())
-    recent_low = float(recent["Low"].min())
+    recent_high, recent_low = float(recent["High"].max()), float(recent["Low"].min())
     consolidation_range = ((recent_high - recent_low) / recent_high) * 100
 
     returns = close.pct_change()
-    volatility_20 = returns.tail(20).std()
-    volatility_60 = returns.tail(60).std()
-    volatility_contracting = volatility_20 < volatility_60
+    volatility_contracting = returns.tail(20).std() < returns.tail(60).std()
 
-    volume_10 = float(volume.tail(10).mean())
-    volume_30 = float(volume.tail(30).mean())
+    volume_10, volume_30 = float(volume.tail(10).mean()), float(volume.tail(30).mean())
     volume_ratio = volume_10 / volume_30 if volume_30 > 0 else 1
     volume_dryup = volume_ratio < 0.85
 
     last_10 = df.tail(10)
-    high_10 = float(last_10["High"].max())
-    low_10 = float(last_10["Low"].min())
-    range_10 = ((high_10 - low_10) / high_10) * 100
+    range_10 = ((float(last_10["High"].max()) - float(last_10["Low"].min())) / float(last_10["High"].max())) * 100
     tight_action = range_10 < 10
 
     pivot = recent_high
@@ -556,55 +534,39 @@ def analyze_vcp(df):
     breakout_volume = breakout_volume_ratio >= 1.5
 
     score = 0
-    if trend_score >= 4:
-        score += 25
-    elif trend_score >= 3:
-        score += 15
-    if prior_gain >= 20:
-        score += 15
-    elif prior_gain >= 10:
-        score += 8
-    if consolidation_range <= 20:
-        score += 10
-    if consolidation_range <= 12:
-        score += 10
-    if volatility_contracting:
-        score += 10
-    if volume_dryup:
-        score += 10
-    if tight_action:
-        score += 5
-    if near_pivot:
-        score += 10
-    if breakout_volume:
-        score += 5
+    score += 25 if trend_score >= 4 else 15 if trend_score >= 3 else 0
+    score += 15 if prior_gain >= 20 else 8 if prior_gain >= 10 else 0
+    score += 10 if consolidation_range <= 20 else 0
+    score += 10 if consolidation_range <= 12 else 0
+    score += 10 if volatility_contracting else 0
+    score += 10 if volume_dryup else 0
+    score += 5 if tight_action else 0
+    score += 10 if near_pivot else 0
+    score += 5 if breakout_volume else 0
 
-    if score >= 75:
-        signal = "STRONG VCP"
-    elif score >= 60:
-        signal = "VCP WATCH"
-    elif score >= 45:
-        signal = "DEVELOPING"
-    else:
-        signal = "NO SETUP"
+    if score >= 75: signal = "STRONG VCP"
+    elif score >= 60: signal = "VCP WATCH"
+    elif score >= 45: signal = "DEVELOPING"
+    else: signal = "NO SETUP"
 
     return {
-        "Price": round(current_price, 2),
-        "Score": score,
-        "Signal": signal,
-        "Trend Score": trend_score,
-        "Prior Gain %": round(prior_gain, 2),
-        "Consolidation %": round(consolidation_range, 2),
-        "10D Range %": round(range_10, 2),
-        "Volume Ratio": round(volume_ratio, 2),
-        "Pivot": round(pivot, 2),
+        "Price": round(current_price, 2), "Score": score, "Signal": signal,
+        "Trend Score": trend_score, "Prior Gain %": round(prior_gain, 2),
+        "Consolidation %": round(consolidation_range, 2), "10D Range %": round(range_10, 2),
+        "Volume Ratio": round(volume_ratio, 2), "Pivot": round(pivot, 2),
         "Distance Pivot %": round(distance_from_pivot, 2),
         "Breakout Vol Ratio": round(breakout_volume_ratio, 2)
     }
 
 
+def signal_badge(signal):
+    m = {"STRONG VCP": "badge-strong", "VCP WATCH": "badge-watch",
+         "DEVELOPING": "badge-dev", "NO SETUP": "badge-none"}
+    return f'<span class="signal-badge {m.get(signal, "badge-none")}">{signal}</span>'
+
+
 # ============================================================
-# SCAN STOCKS
+# SCANNER
 # ============================================================
 
 def scan_stocks(symbols):
@@ -616,279 +578,353 @@ def scan_stocks(symbols):
     for i, symbol in enumerate(symbols):
         name = symbol.replace(".NS", "")
         status.write(f"Scanning {name} ({i + 1}/{total})")
-
         try:
-            df, instrument_id, details, _ = get_stock_iifl_data(symbol)
+            df, instrument_id, _ = get_stock_daily_data(symbol)
             if df is None:
                 progress.progress((i + 1) / total)
                 continue
-
             analysis = analyze_vcp(df)
             if analysis:
+                support, resistance = find_support_resistance(df)
+                is_breakout, breakout_info = detect_breakout(df, resistance)
+                rsi = calc_rsi(df["Close"]).iloc[-1]
+                atr = calc_atr(df).iloc[-1]
                 analysis["Stock"] = name
+                analysis["Symbol"] = symbol
                 analysis["Instrument ID"] = str(instrument_id)
+                analysis["RSI"] = round(float(rsi), 1)
+                analysis["ATR"] = round(float(atr), 2)
+                analysis["Breakout"] = "🚨 YES" if is_breakout else ""
                 results.append(analysis)
         except Exception:
             pass
-
         progress.progress((i + 1) / total)
 
     progress.empty()
     status.empty()
-
     if not results:
         return pd.DataFrame()
-
     return pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
 
 
 # ============================================================
-# SIDEBAR — CONNECTION
+# TRADINGVIEW-STYLE CHART
 # ============================================================
 
-st.sidebar.header("🔐 IIFL Connection")
+def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_info=None):
+    fig = make_subplots(
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.52, 0.14, 0.16, 0.18], vertical_spacing=0.02,
+        specs=[[{}], [{}], [{}], [{}]]
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        name=symbol, increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350"
+    ), row=1, col=1)
+
+    ema_colors = {"EMA21": "#f5c542", "EMA50": "#42a5f5", "EMA150": "#ab47bc", "EMA200": "#ff7043"}
+    for ema, color in ema_colors.items():
+        if ema in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[ema], name=ema, line=dict(color=color, width=1.2)
+            ), row=1, col=1)
+
+    for price, touches in resistance:
+        fig.add_hline(y=price, line=dict(color="#ef5350", width=1, dash="dot"),
+                       annotation_text=f"R {price:.1f}", annotation_font_size=10, row=1, col=1)
+    for price, touches in support:
+        fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
+                       annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
+    if live_price:
+        fig.add_hline(y=live_price, line=dict(color="#42a5f5", width=1.5),
+                       annotation_text=f"LTP {live_price}", annotation_font_size=10, row=1, col=1)
+    if breakout_info:
+        fig.add_annotation(
+            x=df.index[-1], y=df["High"].iloc[-1] * 1.02,
+            text="🚨 BREAKOUT", showarrow=True, arrowhead=2,
+            font=dict(color="#ff5c7a", size=12), row=1, col=1
+        )
+
+    volume_colors = np.where(df["Close"] >= df["Open"], "#26a69a", "#ef5350")
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
+                          marker_color=volume_colors, showlegend=False), row=2, col=1)
+
+    if "RSI" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
+                                  line=dict(color="#f5c542", width=1.3)), row=3, col=1)
+        fig.add_hline(y=70, line=dict(color="#ef5350", width=0.8, dash="dash"), row=3, col=1)
+        fig.add_hline(y=30, line=dict(color="#26a69a", width=0.8, dash="dash"), row=3, col=1)
+
+    if "MACD" in df.columns:
+        macd_colors = np.where(df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
+        fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="MACD Hist",
+                              marker_color=macd_colors, showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD",
+                                  line=dict(color="#42a5f5", width=1.2)), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal",
+                                  line=dict(color="#ff7043", width=1.2)), row=4, col=1)
+
+    fig.update_layout(
+        height=820, template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#131722",
+        font=dict(color="#d1d4dc", size=11),
+        margin=dict(l=10, r=60, t=30, b=10),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+        hovermode="x unified"
+    )
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
+    fig.update_xaxes(rangeslider_visible=False)
+
+    return fig
+
+
+def render_symbol_page(symbol):
+    """Full detail view: chart + indicators + S/R + VCP + breakout, for one symbol."""
+    st.subheader(f"📈 {symbol.replace('.NS', '')}")
+
+    with st.spinner("Loading instrument..."):
+        instrument_id, details = get_instrument_id(symbol)
+
+    if instrument_id is None:
+        st.error(f"❌ Could not find instrument for {symbol}.")
+        return
+
+    with st.spinner("Loading historical data..."):
+        df, errors = get_stock_daily_data(symbol)
+
+    if df is None:
+        st.error("❌ Could not load historical data.")
+        with st.expander("Error details"):
+            for exch, err in errors:
+                st.write(f"`{exch}` → {err}")
+        return
+
+    df_ind = add_indicators(df)
+    support, resistance = find_support_resistance(df)
+    is_breakout, breakout_info = detect_breakout(df, resistance)
+    vcp = analyze_vcp(df)
+
+    col_refresh, col_metrics = st.columns([1, 5])
+    with col_refresh:
+        refresh = st.button("🔄 Refresh Live", key=f"refresh_{symbol}")
+
+    live_price = None
+    state_key = f"quote_{symbol}"
+    if refresh or state_key not in st.session_state:
+        quote, qerr = get_iifl_live_quote(instrument_id, "NSEEQ")
+        if quote:
+            st.session_state[state_key] = quote
+
+    quote = st.session_state.get(state_key)
+    if quote:
+        live_price = quote.get("ltp")
+
+    with col_metrics:
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Price", live_price or df["Close"].iloc[-1])
+        m2.metric("RSI (14)", round(float(df_ind["RSI"].iloc[-1]), 1))
+        m3.metric("ATR (14)", round(float(df_ind["ATR"].iloc[-1]), 2))
+        m4.metric("VCP Score", vcp["Score"] if vcp else "—")
+        m5.metric("Signal", vcp["Signal"] if vcp else "—")
+        m6.metric("Breakout", "🚨 YES" if is_breakout else "No")
+
+    if is_breakout and breakout_info:
+        vol_note = "with volume confirmation ✅" if breakout_info["volume_confirmed"] else "on light volume ⚠️"
+        st.markdown(
+            f'<span class="signal-badge badge-breakout">🚨 BREAKOUT</span> '
+            f'above resistance **₹{breakout_info["level"]:.1f}** ({breakout_info["touches"]} prior touches), '
+            f'{vol_note} — volume {breakout_info["volume_ratio"]}x average',
+            unsafe_allow_html=True
+        )
+
+    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info)
+    st.plotly_chart(fig, use_container_width=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.write("**Resistance levels**")
+        if resistance:
+            st.dataframe(pd.DataFrame(resistance, columns=["Price", "Touches"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("None detected.")
+    with c2:
+        st.write("**Support levels**")
+        if support:
+            st.dataframe(pd.DataFrame(support, columns=["Price", "Touches"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("None detected.")
+    with c3:
+        st.write("**VCP details**")
+        if vcp:
+            st.dataframe(pd.DataFrame([vcp]).T.rename(columns={0: "Value"}),
+                         use_container_width=True)
+        else:
+            st.caption("Not enough history (needs 150+ candles).")
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+if "page" not in st.session_state:
+    st.session_state["page"] = "🏠 Overview"
+if "chart_symbol" not in st.session_state:
+    st.session_state["chart_symbol"] = "RELIANCE.NS"
+
+st.sidebar.title("📈 IIFL VCP Terminal")
+st.sidebar.markdown("---")
+st.sidebar.header("🔐 Connection")
 
 if "iifl_user_session" in st.session_state:
-    st.sidebar.success("🟢 IIFL Connected")
+    st.sidebar.success("🟢 Connected")
 else:
-    st.sidebar.error("🔴 IIFL Not Connected")
+    st.sidebar.error("🔴 Not connected")
     st.sidebar.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📋 Watchlist")
-
-watchlist_source = st.sidebar.radio(
-    "Stock universe",
-    ["Auto-fetch NSE F&O list", "Built-in F&O list (~180 stocks)", "Custom (paste symbols)"],
-    index=1
+page = st.sidebar.radio(
+    "Navigate",
+    ["🏠 Overview", "🔍 VCP Scanner", "📈 Chart Explorer"],
+    index=["🏠 Overview", "🔍 VCP Scanner", "📈 Chart Explorer"].index(st.session_state["page"])
 )
+st.session_state["page"] = page
 
-if watchlist_source == "Auto-fetch NSE F&O list":
-    fetched = fetch_nse_fo_stock_list()
-    if fetched:
-        active_stocks = fetched
-        st.sidebar.success(f"✅ Fetched {len(active_stocks)} F&O stocks from NSE.")
-    else:
-        active_stocks = NSE_STOCKS
-        st.sidebar.warning(
-            f"⚠️ NSE fetch failed (often blocked from cloud servers). "
-            f"Using built-in list of {len(active_stocks)} stocks instead."
-        )
-elif watchlist_source == "Custom (paste symbols)":
-    custom_text = st.sidebar.text_area(
-        "One symbol per line (e.g. RELIANCE.NS)",
-        value="\n".join(NSE_STOCKS[:20]),
-        height=200
-    )
+st.sidebar.markdown("---")
+st.sidebar.header("📋 Watchlist")
+watchlist_source = st.sidebar.radio(
+    "Stock universe", ["Built-in F&O list (~150 stocks)", "Custom (paste symbols)"], index=0
+)
+if watchlist_source == "Custom (paste symbols)":
+    custom_text = st.sidebar.text_area("One symbol per line", value="\n".join(FO_STOCKS[:20]), height=160)
     active_stocks = [
         s.strip().upper() if s.strip().upper().endswith(".NS") else s.strip().upper() + ".NS"
         for s in custom_text.splitlines() if s.strip()
     ]
-    st.sidebar.info(f"{len(active_stocks)} symbols in custom list.")
 else:
-    active_stocks = NSE_STOCKS
-    st.sidebar.info(f"{len(active_stocks)} stocks in built-in F&O list.")
-
-st.sidebar.markdown("---")
-st.sidebar.header("🧪 IIFL Data Test")
-
-test_symbol = st.sidebar.selectbox(
-    "Select stock",
-    ["RELIANCE.NS", "TCS.NS", "BEL.NS", "HAL.NS", "TITAN.NS", "HDFCBANK.NS", "INFY.NS"]
-)
-
-test_instrument = st.sidebar.button("1️⃣ Test Instrument")
-test_history = st.sidebar.button("2️⃣ Test Historical Data")
+    active_stocks = FO_STOCKS
+st.sidebar.caption(f"{len(active_stocks)} stocks in universe.")
 
 # ============================================================
-# TEST INSTRUMENT
+# PAGE: OVERVIEW
 # ============================================================
 
-if test_instrument:
+if page == "🏠 Overview":
+    st.title("🏠 Dashboard Overview")
+
     if "iifl_user_session" not in st.session_state:
-        st.error("Please login to IIFL first.")
+        st.warning("🔴 Please log in via the sidebar to load live data.")
+        st.markdown("""
+        ### What this terminal does
+        - **Live-ish candlestick charts** (TradingView-style, polled on demand)
+        - **Automatic support & resistance** from swing-high/low clustering
+        - **VCP pattern detection** (Minervini-style scoring)
+        - **EMA 21/50/150/200, RSI, MACD, ATR**
+        - **Breakout alerts** with volume confirmation
+        - **One-click chart** for every stock your scanner finds
+        """)
     else:
-        with st.spinner("Finding IIFL instrument..."):
-            instrument_id, details = get_instrument_id(test_symbol)
-
-        if instrument_id:
-            st.success(f"✅ {test_symbol.replace('.NS', '')} found in IIFL.")
-            st.metric("IIFL Instrument ID", str(instrument_id))
-            with st.expander("View IIFL Instrument Details"):
-                st.json(details)
+        st.success("🟢 Connected to IIFL — use the sidebar to scan or explore charts.")
+        if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
+            results = st.session_state["scan_results"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Stocks scanned", len(results))
+            c2.metric("Strong VCP", int((results["Signal"] == "STRONG VCP").sum()))
+            c3.metric("VCP Watch", int((results["Signal"] == "VCP WATCH").sum()))
+            c4.metric("Breakouts", int((results["Breakout"] == "🚨 YES").sum()))
+            st.markdown("### Top 5 setups from last scan")
+            st.dataframe(results.head(5)[["Stock", "Price", "Score", "Signal", "Breakout"]],
+                        use_container_width=True, hide_index=True)
         else:
-            st.error("❌ Instrument could not be found.")
+            st.info("No scan results yet — run the **🔍 VCP Scanner** page first.")
 
 # ============================================================
-# TEST HISTORICAL DATA — with full transparent error trail
+# PAGE: SCANNER
 # ============================================================
 
-if test_history:
+elif page == "🔍 VCP Scanner":
+    st.title("🔍 VCP Scanner")
+
     if "iifl_user_session" not in st.session_state:
-        st.error("Please login to IIFL first.")
-    else:
-        with st.spinner("Finding IIFL instrument..."):
-            instrument_id, details = get_instrument_id(test_symbol)
-
-        if instrument_id:
-            st.success("✅ Instrument found")
-
-            with st.spinner("Downloading IIFL historical data..."):
-                historical_df, error_log = get_iifl_historical_data(
-                    instrument_id,
-                    (datetime.now() - timedelta(days=365)).strftime("%d-%b-%Y"),
-                    datetime.now().strftime("%d-%b-%Y"),
-                    "1 day"
-                )
-
-            with st.expander("🔍 What was tried (exchange fallback log)", expanded=(historical_df is None)):
-                for exchange, outcome in error_log:
-                    if outcome == "✅ worked":
-                        st.success(f"exchange='{exchange}' → {outcome}")
-                    else:
-                        st.warning(f"exchange='{exchange}' → {outcome}")
-
-            if historical_df is not None:
-                st.success(f"✅ Received {len(historical_df)} daily candles.")
-                st.subheader(f"📊 {test_symbol.replace('.NS', '')} Historical Data")
-                st.dataframe(historical_df.tail(30), use_container_width=True)
-
-                if len(historical_df) >= 150:
-                    analysis = analyze_vcp(historical_df)
-                    if analysis:
-                        st.subheader("📈 VCP Analysis")
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Price", analysis["Price"])
-                        col2.metric("VCP Score", analysis["Score"])
-                        col3.metric("Signal", analysis["Signal"])
-                        st.dataframe(pd.DataFrame([analysis]), use_container_width=True, hide_index=True)
-            else:
-                st.error(
-                    "❌ IIFL returned no historical candles on any exchange code tried. "
-                    "See the fallback log above for IIFL's exact rejection reason on each attempt. "
-                    "If every attempt shows an API-level rejection (not HTTP 401/403), this points to "
-                    "Market Data API not being activated/entitled on your account — confirm with IIFL support."
-                )
-        else:
-            st.error("❌ Instrument could not be found.")
-
-# ============================================================
-# SCANNER SETTINGS
-# ============================================================
-
-st.sidebar.markdown("---")
-st.sidebar.header("📊 Scanner Settings")
-
-score_filter = st.sidebar.slider("Minimum VCP Score", min_value=0, max_value=90, value=45, step=5)
-scan_button = st.sidebar.button("🔍 Scan NSE Stocks")
-
-# ============================================================
-# MAIN SCANNER
-# ============================================================
-
-if scan_button:
-    if "iifl_user_session" not in st.session_state:
-        st.error("🔴 IIFL is not connected.")
+        st.error("🔴 Please log in via the sidebar first.")
         st.stop()
 
-    with st.spinner(f"Scanning {len(active_stocks)} NSE stocks using IIFL..."):
-        results = scan_stocks(active_stocks)
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        score_filter = st.slider("Minimum VCP Score", 0, 90, 45, step=5)
+        scan_button = st.button("🔍 Run Scan", type="primary")
 
-    if results.empty:
-        st.error("❌ No stocks could be processed.")
-        st.info(
-            "Please run '1️⃣ Test Instrument' and '2️⃣ Test Historical Data' first — "
-            "the fallback log there will show IIFL's exact rejection reason."
-        )
-    else:
+    if scan_button:
+        with st.spinner(f"Scanning {len(active_stocks)} stocks..."):
+            st.session_state["scan_results"] = scan_stocks(active_stocks)
+
+    if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
+        results = st.session_state["scan_results"]
         filtered = results[results["Score"] >= score_filter]
 
-        st.success(
-            f"✅ Scan completed — {len(results)} stocks processed, "
-            f"{len(filtered)} passed the filter."
-        )
-
-        st.subheader("🏆 Top VCP Setups")
+        st.success(f"✅ {len(results)} scanned — {len(filtered)} passed filter (score ≥ {score_filter})")
 
         if filtered.empty:
-            st.warning("No stocks currently meet the selected VCP score.")
+            st.warning("No stocks meet the current score threshold.")
         else:
-            columns = [
-                "Stock", "Price", "Score", "Signal", "Trend Score", "Prior Gain %",
-                "Consolidation %", "10D Range %", "Volume Ratio", "Pivot",
-                "Distance Pivot %", "Breakout Vol Ratio", "Instrument ID"
-            ]
-            columns = [c for c in columns if c in filtered.columns]
+            st.markdown("### Results — click 📊 to open the chart")
+            header = st.columns([2, 1.2, 1, 1.4, 1, 1, 1, 1])
+            for h, label in zip(header, ["Stock", "Price", "Score", "Signal", "RSI", "ATR", "Breakout", ""]):
+                h.markdown(f"**{label}**")
 
-            st.dataframe(filtered[columns], use_container_width=True, hide_index=True)
+            for _, row in filtered.iterrows():
+                c = st.columns([2, 1.2, 1, 1.4, 1, 1, 1, 1])
+                c[0].write(row["Stock"])
+                c[1].write(row["Price"])
+                c[2].write(row["Score"])
+                c[3].markdown(signal_badge(row["Signal"]), unsafe_allow_html=True)
+                c[4].write(row["RSI"])
+                c[5].write(row["ATR"])
+                c[6].write(row["Breakout"] or "—")
+                if c[7].button("📊", key=f"chart_btn_{row['Symbol']}"):
+                    st.session_state["chart_symbol"] = row["Symbol"]
+                    st.session_state["page"] = "📈 Chart Explorer"
+                    st.rerun()
 
             csv = filtered.to_csv(index=False)
-            st.download_button(
-                "⬇️ Download VCP Watchlist CSV",
-                data=csv,
-                file_name="iifl_vcp_watchlist.csv",
-                mime="text/csv"
-            )
+            st.download_button("⬇️ Download CSV", data=csv, file_name="vcp_watchlist.csv", mime="text/csv")
 
         with st.expander("📋 View all scanned stocks"):
             st.dataframe(results, use_container_width=True, hide_index=True)
-
-else:
-    if "iifl_user_session" in st.session_state:
-        st.success("🟢 IIFL Connected")
-        st.markdown(
-            """
-### IIFL Connection Ready
-
-Use the sidebar in this order:
-
-**1️⃣ Test Instrument** — verify a symbol maps to an IIFL `instrumentId`.
-
-**2️⃣ Test Historical Data** — verify IIFL returns daily OHLCV candles.
-If this fails, expand the fallback log to see IIFL's exact rejection
-reason for each exchange code tried.
-
-**3️⃣ Scan NSE Stocks** — once the test works, run the VCP scanner.
-"""
-        )
     else:
-        st.warning("🔴 Please login to IIFL.")
-        st.markdown(
-            """
-### How to start
+        st.info("Click **🔍 Run Scan** to evaluate your watchlist.")
 
-1. Click **🔑 Login with IIFL**
-2. Complete your IIFL login.
-3. IIFL redirects back to this app.
-4. The app generates the IIFL user session.
-5. Test RELIANCE.
-6. Run the VCP scanner.
-"""
-        )
+# ============================================================
+# PAGE: CHART EXPLORER
+# ============================================================
 
-    st.markdown(
-        """
-### 📈 VCP Scanner
+elif page == "📈 Chart Explorer":
+    st.title("📈 Chart Explorer")
 
-The scanner evaluates:
+    if "iifl_user_session" not in st.session_state:
+        st.error("🔴 Please log in via the sidebar first.")
+        st.stop()
 
-- Price vs 50/150/200-day moving averages
-- Moving-average alignment
-- Prior price advance
-- 40-day consolidation
-- Volatility contraction
-- Volume dry-up
-- 10-day price tightness
-- Pivot proximity
-- Breakout volume
-
-The conditions are combined into a VCP score.
-"""
+    symbol_choice = st.selectbox(
+        "Symbol",
+        active_stocks,
+        index=active_stocks.index(st.session_state["chart_symbol"])
+        if st.session_state["chart_symbol"] in active_stocks else 0
     )
+    st.session_state["chart_symbol"] = symbol_choice
+
+    render_symbol_page(symbol_choice)
 
 # ============================================================
 # FOOTER
 # ============================================================
 
 st.markdown("---")
-st.caption("Educational tool only. Not investment advice.")
+st.caption("Educational tool only. Not investment advice. Prices are polled on demand, not streamed in real time.")
