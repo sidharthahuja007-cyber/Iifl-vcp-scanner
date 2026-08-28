@@ -714,7 +714,7 @@ def _render_symbol_page_inner(symbol):
         return
 
     with st.spinner("Loading historical data..."):
-        df, errors = get_stock_daily_data(symbol)
+        df, _instrument_id2, errors = get_stock_daily_data(symbol)
 
     if df is None:
         st.error("❌ Could not load historical data.")
