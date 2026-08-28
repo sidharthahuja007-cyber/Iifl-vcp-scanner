@@ -677,13 +677,46 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         margin=dict(l=10, r=60, t=30, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
-        hovermode="x unified"
+        hovermode="x unified",
+        dragmode="pan",
+        uirevision=symbol,  # preserves zoom/pan across reruns (e.g. live-price refresh)
+        hoverlabel=dict(bgcolor="#1c2129", font_size=11, bordercolor="#2a2e39")
     )
+
+    # Crosshair-style spikes on every axis, like TradingView
+    fig.update_xaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
+    )
+    fig.update_yaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
+    )
+
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Volume", row=2, col=1)
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
     fig.update_yaxes(title_text="MACD", row=4, col=1)
-    fig.update_xaxes(rangeslider_visible=False)
+
+    # Date range selector — 1M / 3M / 6M / 1Y / All — on the top price panel
+    fig.update_xaxes(
+        rangeslider_visible=False,
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(step="all", label="All")
+            ],
+            bgcolor="#1c2129", activecolor="#2962ff",
+            font=dict(color="#d1d4dc", size=10),
+            x=0, y=1.08
+        ),
+        row=1, col=1
+    )
 
     return fig
 
@@ -762,7 +795,20 @@ def _render_symbol_page_inner(symbol):
         )
 
     fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "displayModeBar": True,
+            "modeBarButtonsToRemove": [
+                "select2d", "lasso2d", "autoScale2d", "toggleSpikelines"
+            ],
+            "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+            "doubleClick": "reset"
+        }
+    )
 
     c1, c2, c3 = st.columns(3)
     with c1:
