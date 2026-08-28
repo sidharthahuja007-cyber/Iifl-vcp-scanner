@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import hashlib
 import json
+import traceback
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
@@ -349,15 +350,18 @@ def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"
 
 
 def get_stock_daily_data(symbol, days=400):
-    instrument_id, details = get_instrument_id(symbol)
-    if instrument_id is None:
-        return None, None, []
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-    df, errors = get_iifl_historical_data(
-        instrument_id, start_date.strftime("%d-%b-%Y"), end_date.strftime("%d-%b-%Y"), "1 day"
-    )
-    return df, instrument_id, errors
+    try:
+        instrument_id, details = get_instrument_id(symbol)
+        if instrument_id is None:
+            return None, None, [("lookup", f"No instrument found for {symbol}.")]
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        df, errors = get_iifl_historical_data(
+            instrument_id, start_date.strftime("%d-%b-%Y"), end_date.strftime("%d-%b-%Y"), "1 day"
+        )
+        return df, instrument_id, errors
+    except Exception as e:
+        return None, None, [("exception", f"{type(e).__name__}: {e}")]
 
 
 def get_iifl_live_quote(instrument_id, exchange="NSEEQ"):
@@ -688,6 +692,20 @@ def render_symbol_page(symbol):
     """Full detail view: chart + indicators + S/R + VCP + breakout, for one symbol."""
     st.subheader(f"📈 {symbol.replace('.NS', '')}")
 
+    try:
+        _render_symbol_page_inner(symbol)
+    except Exception as e:
+        st.error(f"⚠️ Error while rendering this chart: **{type(e).__name__}**: {e}")
+        with st.expander("Full traceback (for debugging)"):
+            tb = traceback.format_exc()
+            # Strip anything that looks like a bearer token before displaying
+            session_token = st.session_state.get("iifl_user_session", "")
+            if session_token:
+                tb = tb.replace(session_token, "***REDACTED-TOKEN***")
+            st.code(tb)
+
+
+def _render_symbol_page_inner(symbol):
     with st.spinner("Loading instrument..."):
         instrument_id, details = get_instrument_id(symbol)
 
