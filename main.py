@@ -705,7 +705,7 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
 
     # Last-close price tag, boxed on the right edge — like TradingView's price label
     fig.add_annotation(
-        xref="paper", x=1.0, yref="y", y=last_close, y0=last_close,
+        xref="paper", x=1.0, yref="y", y=last_close,
         xanchor="left", yanchor="middle",
         text=f"  {last_close:.2f}  ",
         showarrow=False, bgcolor=close_color, font=dict(color="#0e1117", size=11, family="monospace"),
