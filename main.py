@@ -230,6 +230,62 @@ def find_iifl_instrument(symbol):
     return None
 
 
+@st.cache_data(ttl=86400)
+def fetch_nse_index_list(index_csv_url):
+    """
+    Attempts to fetch an NSE index constituent list (e.g. Nifty 500) directly
+    from NSE's archives. NSE frequently blocks non-browser / cloud-server
+    requests, so this can legitimately fail — callers should offer a CSV
+    upload fallback rather than assume this always works.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,*/*",
+        "Referer": "https://www.nseindia.com/"
+    }
+    try:
+        r = requests.get(index_csv_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        df.columns = [c.strip() for c in df.columns]
+        symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
+        if symbol_col is None:
+            return None
+        symbols = df[symbol_col].astype(str).str.strip().dropna().unique().tolist()
+        return sorted(set(f"{s}.NS" for s in symbols if s and s.upper() != "SYMBOL"))
+    except Exception:
+        return None
+
+
+def parse_uploaded_symbol_csv(uploaded_file):
+    """Parses a user-uploaded CSV/text file with a Symbol column (or one symbol per line)."""
+    try:
+        content = uploaded_file.read().decode("utf-8", errors="ignore")
+        try:
+            df = pd.read_csv(StringIO(content))
+            symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
+            if symbol_col:
+                symbols = df[symbol_col].astype(str).str.strip().dropna().unique().tolist()
+                return sorted(set(
+                    s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
+                    for s in symbols if s and s.upper() != "SYMBOL"
+                ))
+        except Exception:
+            pass
+        # Fallback: treat as one symbol per line
+        lines = [l.strip() for l in content.splitlines() if l.strip()]
+        return sorted(set(
+            s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
+            for s in lines
+        ))
+    except Exception:
+        return []
+
+
 def get_instrument_id(symbol):
     row = find_iifl_instrument(symbol)
     if row is None:
@@ -635,15 +691,47 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
                 x=df.index, y=df[ema], name=ema, line=dict(color=color, width=1.2)
             ), row=1, col=1)
 
+    last_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else last_close
+    is_up = last_close >= prev_close
+    close_color = "#26a69a" if is_up else "#ef5350"
+
     for price, touches in resistance:
         fig.add_hline(y=price, line=dict(color="#ef5350", width=1, dash="dot"),
                        annotation_text=f"R {price:.1f}", annotation_font_size=10, row=1, col=1)
     for price, touches in support:
         fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
                        annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
+
+    # Last-close price tag, boxed on the right edge — like TradingView's price label
+    fig.add_annotation(
+        xref="paper", x=1.0, yref="y", y=last_close, y0=last_close,
+        xanchor="left", yanchor="middle",
+        text=f"  {last_close:.2f}  ",
+        showarrow=False, bgcolor=close_color, font=dict(color="#0e1117", size=11, family="monospace"),
+        borderpad=2, row=1, col=1
+    )
+
+    # Live (polled) price tag — separate box just below/above, in blue
     if live_price:
-        fig.add_hline(y=live_price, line=dict(color="#42a5f5", width=1.5),
-                       annotation_text=f"LTP {live_price}", annotation_font_size=10, row=1, col=1)
+        live_color = "#26a69a" if live_price >= last_close else "#ef5350"
+        fig.add_hline(y=live_price, line=dict(color="#2962ff", width=1.3, dash="solid"), row=1, col=1)
+        fig.add_annotation(
+            xref="paper", x=1.0, yref="y", y=live_price,
+            xanchor="left", yanchor="middle",
+            text=f"  LTP {live_price:.2f}  ",
+            showarrow=False, bgcolor="#2962ff", font=dict(color="#ffffff", size=11, family="monospace"),
+            borderpad=2, row=1, col=1
+        )
+
+    # Faint watermark of the symbol name in the background, like TradingView
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.5, y=0.72,
+        text=symbol.replace(".NS", ""),
+        showarrow=False, font=dict(color="rgba(255,255,255,0.05)", size=72),
+        row=1, col=1
+    )
+
     if breakout_info:
         fig.add_annotation(
             x=df.index[-1], y=df["High"].iloc[-1] * 1.02,
@@ -674,7 +762,7 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         height=820, template="plotly_dark",
         paper_bgcolor="#0e1117", plot_bgcolor="#131722",
         font=dict(color="#d1d4dc", size=11),
-        margin=dict(l=10, r=60, t=30, b=10),
+        margin=dict(l=10, r=90, t=30, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
         hovermode="x unified",
@@ -718,6 +806,11 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         row=1, col=1
     )
 
+    fig.update_xaxes(
+        tickformat="%b '%y", tickfont=dict(size=10, color="#787b86"),
+        row=4, col=1
+    )
+
     return fig
 
 
@@ -750,10 +843,17 @@ def _render_symbol_page_inner(symbol):
         df, _instrument_id2, errors = get_stock_daily_data(symbol)
 
     if df is None:
-        st.error("❌ Could not load historical data.")
-        with st.expander("Error details"):
-            for exch, err in errors:
-                st.write(f"`{exch}` → {err}")
+        session_expired = errors and any("401" in str(err) for _, err in errors)
+        if session_expired:
+            st.warning("🔒 Your IIFL session has expired. Please log in again.")
+            if "iifl_user_session" in st.session_state:
+                del st.session_state["iifl_user_session"]
+            st.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
+        else:
+            st.error("❌ Could not load historical data.")
+            with st.expander("Error details"):
+                for exch, err in errors:
+                    st.write(f"`{exch}` → {err}")
         return
 
     df_ind = add_indicators(df)
@@ -864,9 +964,42 @@ st.session_state["page"] = page
 st.sidebar.markdown("---")
 st.sidebar.header("📋 Watchlist")
 watchlist_source = st.sidebar.radio(
-    "Stock universe", ["Built-in F&O list (~150 stocks)", "Custom (paste symbols)"], index=0
+    "Stock universe",
+    ["Built-in F&O list (~150 stocks)", "Nifty 500 (auto-fetch)", "Upload CSV", "Custom (paste symbols)"],
+    index=0
 )
-if watchlist_source == "Custom (paste symbols)":
+
+NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+if watchlist_source == "Nifty 500 (auto-fetch)":
+    fetched = fetch_nse_index_list(NIFTY500_URL)
+    if fetched:
+        active_stocks = fetched
+        st.sidebar.success(f"✅ Fetched {len(active_stocks)} Nifty 500 stocks from NSE.")
+    else:
+        st.sidebar.error(
+            "❌ NSE blocked this request (common from cloud servers). "
+            "Use 'Upload CSV' instead — download the list from NSE's website "
+            "on your own device, then upload it here."
+        )
+        active_stocks = FO_STOCKS
+        st.sidebar.caption(f"Falling back to built-in list ({len(active_stocks)} stocks).")
+elif watchlist_source == "Upload CSV":
+    uploaded = st.sidebar.file_uploader(
+        "Upload a CSV with a 'Symbol' column, or a .txt with one symbol per line",
+        type=["csv", "txt"]
+    )
+    if uploaded is not None:
+        active_stocks = parse_uploaded_symbol_csv(uploaded)
+        if active_stocks:
+            st.sidebar.success(f"✅ Loaded {len(active_stocks)} symbols from file.")
+        else:
+            st.sidebar.error("Could not parse any symbols from this file.")
+            active_stocks = FO_STOCKS
+    else:
+        st.sidebar.info("Waiting for file upload...")
+        active_stocks = FO_STOCKS
+elif watchlist_source == "Custom (paste symbols)":
     custom_text = st.sidebar.text_area("One symbol per line", value="\n".join(FO_STOCKS[:20]), height=160)
     active_stocks = [
         s.strip().upper() if s.strip().upper().endswith(".NS") else s.strip().upper() + ".NS"
