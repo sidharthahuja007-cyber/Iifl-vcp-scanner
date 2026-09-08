@@ -554,7 +554,7 @@ def detect_breakout(df, resistance_levels):
 # VCP ANALYSIS
 # ============================================================
 
-def analyze_vcp(df):
+def analyze_vcp_old(df):
     if df is None or len(df) < 150:
         return None
 
