@@ -645,7 +645,7 @@ def scan_stocks(symbols):
             if df is None:
                 progress.progress((i + 1) / total)
                 continue
-            analysis = analyze_vcp(df)
+            analysis = analyze_vcp_engine(df)
             if analysis:
                 support, resistance = find_support_resistance(df)
                 is_breakout, breakout_info = detect_breakout(df, resistance)
