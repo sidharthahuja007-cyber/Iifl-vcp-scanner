@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from io import StringIO
+from vcp import analyze as analyze_vcp_engine
+from market_data import *
 
 # ============================================================
 # PAGE CONFIG + THEME
