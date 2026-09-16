@@ -234,12 +234,6 @@ def find_iifl_instrument(symbol):
 
 @st.cache_data(ttl=86400)
 def fetch_nse_index_list(index_csv_url):
-    """
-    Attempts to fetch an NSE index constituent list (e.g. Nifty 500) directly
-    from NSE's archives. NSE frequently blocks non-browser / cloud-server
-    requests, so this can legitimately fail — callers should offer a CSV
-    upload fallback rather than assume this always works.
-    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -264,7 +258,6 @@ def fetch_nse_index_list(index_csv_url):
 
 
 def parse_uploaded_symbol_csv(uploaded_file):
-    """Parses a user-uploaded CSV/text file with a Symbol column (or one symbol per line)."""
     try:
         content = uploaded_file.read().decode("utf-8", errors="ignore")
         try:
@@ -278,7 +271,6 @@ def parse_uploaded_symbol_csv(uploaded_file):
                 ))
         except Exception:
             pass
-        # Fallback: treat as one symbol per line
         lines = [l.strip() for l in content.splitlines() if l.strip()]
         return sorted(set(
             s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
@@ -297,7 +289,7 @@ def get_instrument_id(symbol):
 
 
 # ============================================================
-# HISTORICAL DATA (uses the confirmed-correct lowercase key)
+# HISTORICAL DATA
 # ============================================================
 
 def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
@@ -645,12 +637,18 @@ def scan_stocks(symbols):
             if df is None:
                 progress.progress((i + 1) / total)
                 continue
+
             analysis = analyze_vcp_engine(df)
+
             if analysis:
+                # FIX: Guarantee Price exists even if vcp.py does not return it.
+                analysis["Price"] = round(float(df["Close"].iloc[-1]), 2)
+
                 support, resistance = find_support_resistance(df)
                 is_breakout, breakout_info = detect_breakout(df, resistance)
                 rsi = calc_rsi(df["Close"]).iloc[-1]
                 atr = calc_atr(df).iloc[-1]
+
                 analysis["Stock"] = name
                 analysis["Symbol"] = symbol
                 analysis["Instrument ID"] = str(instrument_id)
@@ -658,14 +656,18 @@ def scan_stocks(symbols):
                 analysis["ATR"] = round(float(atr), 2)
                 analysis["Breakout"] = "🚨 YES" if is_breakout else ""
                 results.append(analysis)
+
         except Exception:
             pass
+
         progress.progress((i + 1) / total)
 
     progress.empty()
     status.empty()
+
     if not results:
         return pd.DataFrame()
+
     return pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
 
 
@@ -705,7 +707,6 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
                        annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
 
-    # Last-close price tag, boxed on the right edge — like TradingView's price label
     fig.add_annotation(
         xref="paper", x=1.0, yref="y", y=last_close,
         xanchor="left", yanchor="middle",
@@ -714,7 +715,6 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         borderpad=2, row=1, col=1
     )
 
-    # Live (polled) price tag — separate box just below/above, in blue
     if live_price:
         live_color = "#26a69a" if live_price >= last_close else "#ef5350"
         fig.add_hline(y=live_price, line=dict(color="#2962ff", width=1.3, dash="solid"), row=1, col=1)
@@ -726,7 +726,6 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
             borderpad=2, row=1, col=1
         )
 
-    # Faint watermark of the symbol name in the background, like TradingView
     fig.add_annotation(
         xref="paper", yref="paper", x=0.5, y=0.72,
         text=symbol.replace(".NS", ""),
@@ -769,11 +768,10 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
         hovermode="x unified",
         dragmode="pan",
-        uirevision=symbol,  # preserves zoom/pan across reruns (e.g. live-price refresh)
+        uirevision=symbol,
         hoverlabel=dict(bgcolor="#1c2129", font_size=11, bordercolor="#2a2e39")
     )
 
-    # Crosshair-style spikes on every axis, like TradingView
     fig.update_xaxes(
         showspikes=True, spikemode="across", spikesnap="cursor",
         spikecolor="#758696", spikethickness=1, spikedash="solid",
@@ -790,7 +788,6 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
     fig.update_yaxes(title_text="MACD", row=4, col=1)
 
-    # Date range selector — 1M / 3M / 6M / 1Y / All — on the top price panel
     fig.update_xaxes(
         rangeslider_visible=False,
         rangeselector=dict(
@@ -817,7 +814,6 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
 
 
 def render_symbol_page(symbol):
-    """Full detail view: chart + indicators + S/R + VCP + breakout, for one symbol."""
     st.subheader(f"📈 {symbol.replace('.NS', '')}")
 
     try:
@@ -826,7 +822,6 @@ def render_symbol_page(symbol):
         st.error(f"⚠️ Error while rendering this chart: **{type(e).__name__}**: {e}")
         with st.expander("Full traceback (for debugging)"):
             tb = traceback.format_exc()
-            # Strip anything that looks like a bearer token before displaying
             session_token = st.session_state.get("iifl_user_session", "")
             if session_token:
                 tb = tb.replace(session_token, "***REDACTED-TOKEN***")
@@ -861,7 +856,9 @@ def _render_symbol_page_inner(symbol):
     df_ind = add_indicators(df)
     support, resistance = find_support_resistance(df)
     is_breakout, breakout_info = detect_breakout(df, resistance)
-    vcp = analyze_vcp(df)
+
+    # FIX: use the imported VCP engine consistently.
+    vcp = analyze_vcp_engine(df)
 
     col_refresh, col_metrics = st.columns([1, 5])
     with col_refresh:
@@ -883,8 +880,8 @@ def _render_symbol_page_inner(symbol):
         m1.metric("Price", live_price or df["Close"].iloc[-1])
         m2.metric("RSI (14)", round(float(df_ind["RSI"].iloc[-1]), 1))
         m3.metric("ATR (14)", round(float(df_ind["ATR"].iloc[-1]), 2))
-        m4.metric("VCP Score", vcp["Score"] if vcp else "—")
-        m5.metric("Signal", vcp["Signal"] if vcp else "—")
+        m4.metric("VCP Score", vcp.get("Score", "—") if vcp else "—")
+        m5.metric("Signal", vcp.get("Signal", "—") if vcp else "—")
         m6.metric("Breakout", "🚨 YES" if is_breakout else "No")
 
     if is_breakout and breakout_info:
@@ -1081,12 +1078,13 @@ elif page == "🔍 VCP Scanner":
             for _, row in filtered.iterrows():
                 c = st.columns([2, 1.2, 1, 1.4, 1, 1, 1, 1])
                 c[0].write(row["Stock"])
-                c[1].write(row["Price"])
-                c[2].write(row["Score"])
-                c[3].markdown(signal_badge(row["Signal"]), unsafe_allow_html=True)
-                c[4].write(row["RSI"])
-                c[5].write(row["ATR"])
-                c[6].write(row["Breakout"] or "—")
+                # FIX: safe access so missing columns cannot crash the page.
+                c[1].write(row.get("Price", "—"))
+                c[2].write(row.get("Score", "—"))
+                c[3].markdown(signal_badge(row.get("Signal", "NO SETUP")), unsafe_allow_html=True)
+                c[4].write(row.get("RSI", "—"))
+                c[5].write(row.get("ATR", "—"))
+                c[6].write(row.get("Breakout", "") or "—")
                 if c[7].button("📊", key=f"chart_btn_{row['Symbol']}"):
                     st.session_state["chart_symbol"] = row["Symbol"]
                     st.session_state["page"] = "📈 Chart Explorer"
