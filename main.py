@@ -675,112 +675,449 @@ def scan_stocks(symbols):
 # TRADINGVIEW-STYLE CHART
 # ============================================================
 
-def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_info=None):
+def render_tv_chart(
+    symbol,
+    df,
+    support,
+    resistance,
+    live_price=None,
+    breakout_info=None,
+    vcp=None
+):
+    """
+    Enhanced TradingView-style chart.
+
+    Improvements:
+    - VCP pivot + 5% buy-zone visualization when a valid pivot is available
+    - 20-day average volume + volume-ratio markers
+    - Recent high-volume bars highlighted
+    - Cleaner support/resistance labels
+    - VCP score/signal shown on the chart
+    - Better hover information
+    - Keeps the existing 1M/3M/6M/1Y/All controls
+    """
+    d = df.copy()
+
+    # Make sure indicators needed by the chart exist.
+    if "RSI" not in d.columns:
+        d["RSI"] = calc_rsi(d["Close"])
+    if "MACD" not in d.columns or "MACD_Signal" not in d.columns or "MACD_Hist" not in d.columns:
+        macd, signal, hist = calc_macd(d["Close"])
+        d["MACD"] = macd
+        d["MACD_Signal"] = signal
+        d["MACD_Hist"] = hist
+
+    d["Vol20"] = d["Volume"].rolling(20, min_periods=5).mean()
+    d["VolRatio20"] = d["Volume"] / d["Vol20"].replace(0, np.nan)
+
     fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True,
-        row_heights=[0.52, 0.14, 0.16, 0.18], vertical_spacing=0.02,
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.54, 0.15, 0.14, 0.17],
+        vertical_spacing=0.018,
         specs=[[{}], [{}], [{}], [{}]]
     )
 
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-        name=symbol, increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350"
-    ), row=1, col=1)
+    # --------------------------------------------------------
+    # PRICE / CANDLESTICK
+    # --------------------------------------------------------
+    fig.add_trace(
+        go.Candlestick(
+            x=d.index,
+            open=d["Open"],
+            high=d["High"],
+            low=d["Low"],
+            close=d["Close"],
+            name=symbol,
+            increasing_line_color="#26a69a",
+            decreasing_line_color="#ef5350",
+            increasing_fillcolor="#26a69a",
+            decreasing_fillcolor="#ef5350",
+            hovertext=[
+                f"{symbol.replace('.NS','')}<br>"
+                f"O: {o:.2f}<br>H: {h:.2f}<br>L: {l:.2f}<br>C: {c:.2f}<br>"
+                f"Vol: {v:,.0f}"
+                for o, h, l, c, v in zip(
+                    d["Open"], d["High"], d["Low"], d["Close"], d["Volume"]
+                )
+            ],
+            hoverinfo="text"
+        ),
+        row=1,
+        col=1
+    )
 
-    ema_colors = {"EMA21": "#f5c542", "EMA50": "#42a5f5", "EMA150": "#ab47bc", "EMA200": "#ff7043"}
+    ema_colors = {
+        "EMA21": "#f5c542",
+        "EMA50": "#42a5f5",
+        "EMA150": "#ab47bc",
+        "EMA200": "#ff7043"
+    }
     for ema, color in ema_colors.items():
-        if ema in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df[ema], name=ema, line=dict(color=color, width=1.2)
-            ), row=1, col=1)
+        if ema in d.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=d.index,
+                    y=d[ema],
+                    name=ema,
+                    mode="lines",
+                    line=dict(color=color, width=1.15),
+                    hovertemplate=f"{ema}: %{{y:.2f}}<extra></extra>"
+                ),
+                row=1,
+                col=1
+            )
 
-    last_close = float(df["Close"].iloc[-1])
-    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else last_close
-    is_up = last_close >= prev_close
-    close_color = "#26a69a" if is_up else "#ef5350"
+    last_close = float(d["Close"].iloc[-1])
+    prev_close = float(d["Close"].iloc[-2]) if len(d) > 1 else last_close
+    close_color = "#26a69a" if last_close >= prev_close else "#ef5350"
+
+    # --------------------------------------------------------
+    # SUPPORT / RESISTANCE
+    # Only display levels that are reasonably close to the
+    # current market area to avoid turning the chart into a grid.
+    # --------------------------------------------------------
+    price_min = float(d["Low"].tail(180).min())
+    price_max = float(d["High"].tail(180).max())
+    chart_span = max(price_max - price_min, last_close * 0.05)
+
+    def level_is_relevant(level):
+        return abs(float(level) - last_close) <= chart_span * 0.85
 
     for price, touches in resistance:
-        fig.add_hline(y=price, line=dict(color="#ef5350", width=1, dash="dot"),
-                       annotation_text=f"R {price:.1f}", annotation_font_size=10, row=1, col=1)
+        if level_is_relevant(price):
+            fig.add_hline(
+                y=price,
+                line=dict(color="#ef5350", width=1, dash="dot"),
+                annotation_text=f"R ₹{price:.1f}  ×{touches}",
+                annotation_position="top left",
+                annotation_font_size=9,
+                row=1,
+                col=1
+            )
+
     for price, touches in support:
-        fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
-                       annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
+        if level_is_relevant(price):
+            fig.add_hline(
+                y=price,
+                line=dict(color="#26a69a", width=1, dash="dot"),
+                annotation_text=f"S ₹{price:.1f}  ×{touches}",
+                annotation_position="bottom left",
+                annotation_font_size=9,
+                row=1,
+                col=1
+            )
 
-    fig.add_annotation(
-        xref="paper", x=1.0, yref="y", y=last_close,
-        xanchor="left", yanchor="middle",
-        text=f"  {last_close:.2f}  ",
-        showarrow=False, bgcolor=close_color, font=dict(color="#0e1117", size=11, family="monospace"),
-        borderpad=2, row=1, col=1
-    )
+    # --------------------------------------------------------
+    # VCP PIVOT + BUY ZONE
+    # Uses the VCP engine's Pivot when available.
+    # Otherwise, do not invent a pivot; the nearest resistance
+    # remains the visible breakout reference.
+    # --------------------------------------------------------
+    pivot = None
+    if isinstance(vcp, dict):
+        raw_pivot = vcp.get("Pivot")
+        try:
+            if raw_pivot is not None and np.isfinite(float(raw_pivot)):
+                pivot = float(raw_pivot)
+        except Exception:
+            pivot = None
 
-    if live_price:
-        live_color = "#26a69a" if live_price >= last_close else "#ef5350"
-        fig.add_hline(y=live_price, line=dict(color="#2962ff", width=1.3, dash="solid"), row=1, col=1)
-        fig.add_annotation(
-            xref="paper", x=1.0, yref="y", y=live_price,
-            xanchor="left", yanchor="middle",
-            text=f"  LTP {live_price:.2f}  ",
-            showarrow=False, bgcolor="#2962ff", font=dict(color="#ffffff", size=11, family="monospace"),
-            borderpad=2, row=1, col=1
+    if pivot is not None and pivot > 0:
+        buy_zone_top = pivot * 1.05
+
+        fig.add_hline(
+            y=pivot,
+            line=dict(color="#2962ff", width=1.7, dash="dash"),
+            annotation_text=f"VCP PIVOT ₹{pivot:.2f}",
+            annotation_position="top right",
+            annotation_font_size=10,
+            row=1,
+            col=1
         )
 
-    fig.add_annotation(
-        xref="paper", yref="paper", x=0.5, y=0.72,
-        text=symbol.replace(".NS", ""),
-        showarrow=False, font=dict(color="rgba(255,255,255,0.05)", size=72),
-        row=1, col=1
+        # Shade only the 0–5% area above pivot.
+        fig.add_hrect(
+            y0=pivot,
+            y1=buy_zone_top,
+            fillcolor="#2962ff",
+            opacity=0.06,
+            line_width=0,
+            annotation_text="5% pivot zone",
+            annotation_position="top left",
+            row=1,
+            col=1
+        )
+
+    # --------------------------------------------------------
+    # CURRENT PRICE / LIVE PRICE LABELS
+    # --------------------------------------------------------
+    fig.add_hline(
+        y=last_close,
+        line=dict(color=close_color, width=0.8, dash="dot"),
+        opacity=0.55,
+        row=1,
+        col=1
     )
+    fig.add_annotation(
+        xref="paper",
+        x=1.0,
+        yref="y",
+        y=last_close,
+        xanchor="left",
+        yanchor="middle",
+        text=f"  ₹{last_close:.2f}  ",
+        showarrow=False,
+        bgcolor=close_color,
+        font=dict(color="#0e1117", size=11, family="monospace"),
+        borderpad=2,
+        row=1,
+        col=1
+    )
+
+    if live_price is not None:
+        try:
+            live_price = float(live_price)
+            live_color = "#26a69a" if live_price >= last_close else "#ef5350"
+            fig.add_hline(
+                y=live_price,
+                line=dict(color="#2962ff", width=1.4),
+                row=1,
+                col=1
+            )
+            fig.add_annotation(
+                xref="paper",
+                x=1.0,
+                yref="y",
+                y=live_price,
+                xanchor="left",
+                yanchor="middle",
+                text=f"  LTP ₹{live_price:.2f}  ",
+                showarrow=False,
+                bgcolor="#2962ff",
+                font=dict(color="#ffffff", size=10, family="monospace"),
+                borderpad=2,
+                row=1,
+                col=1
+            )
+        except Exception:
+            pass
+
+    # Watermark
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0.5,
+        y=0.72,
+        text=symbol.replace(".NS", ""),
+        showarrow=False,
+        font=dict(color="rgba(255,255,255,0.045)", size=72),
+        row=1,
+        col=1
+    )
+
+    # VCP status badge
+    if isinstance(vcp, dict):
+        vcp_score = vcp.get("Score")
+        vcp_signal = vcp.get("Signal")
+        if vcp_signal:
+            score_text = f" • Score {vcp_score}" if vcp_score is not None else ""
+            fig.add_annotation(
+                xref="paper",
+                yref="paper",
+                x=0.01,
+                y=0.98,
+                text=f"<b>{vcp_signal}</b>{score_text}",
+                showarrow=False,
+                bgcolor="#1c2129",
+                bordercolor="#39414d",
+                borderwidth=1,
+                borderpad=5,
+                font=dict(size=11, color="#d1d4dc"),
+                xanchor="left",
+                yanchor="top"
+            )
 
     if breakout_info:
         fig.add_annotation(
-            x=df.index[-1], y=df["High"].iloc[-1] * 1.02,
-            text="🚨 BREAKOUT", showarrow=True, arrowhead=2,
-            font=dict(color="#ff5c7a", size=12), row=1, col=1
+            x=d.index[-1],
+            y=float(d["High"].iloc[-1]) * 1.025,
+            text="🚨 BREAKOUT",
+            showarrow=True,
+            arrowhead=2,
+            ax=0,
+            ay=-35,
+            font=dict(color="#ff5c7a", size=12),
+            row=1,
+            col=1
         )
 
-    volume_colors = np.where(df["Close"] >= df["Open"], "#26a69a", "#ef5350")
-    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
-                          marker_color=volume_colors, showlegend=False), row=2, col=1)
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
+    volume_colors = np.where(
+        d["Close"] >= d["Open"],
+        "#26a69a",
+        "#ef5350"
+    )
 
-    if "RSI" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
-                                  line=dict(color="#f5c542", width=1.3)), row=3, col=1)
-        fig.add_hline(y=70, line=dict(color="#ef5350", width=0.8, dash="dash"), row=3, col=1)
-        fig.add_hline(y=30, line=dict(color="#26a69a", width=0.8, dash="dash"), row=3, col=1)
+    # Highlight unusually high volume (>1.5x 20D average).
+    high_volume = d["VolRatio20"] >= 1.5
+    volume_colors = np.where(high_volume, "#f5c542", volume_colors)
 
-    if "MACD" in df.columns:
-        macd_colors = np.where(df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
-        fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="MACD Hist",
-                              marker_color=macd_colors, showlegend=False), row=4, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD",
-                                  line=dict(color="#42a5f5", width=1.2)), row=4, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal",
-                                  line=dict(color="#ff7043", width=1.2)), row=4, col=1)
+    fig.add_trace(
+        go.Bar(
+            x=d.index,
+            y=d["Volume"],
+            name="Volume",
+            marker_color=volume_colors,
+            showlegend=False,
+            hovertemplate="Volume: %{y:,.0f}<extra></extra>"
+        ),
+        row=2,
+        col=1
+    )
 
+    fig.add_trace(
+        go.Scatter(
+            x=d.index,
+            y=d["Vol20"],
+            name="20D Avg Volume",
+            line=dict(color="#9aa4b2", width=1.2),
+            hovertemplate="20D Avg Vol: %{y:,.0f}<extra></extra>"
+        ),
+        row=2,
+        col=1
+    )
+
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
+    fig.add_trace(
+        go.Scatter(
+            x=d.index,
+            y=d["RSI"],
+            name="RSI 14",
+            line=dict(color="#f5c542", width=1.35),
+            hovertemplate="RSI: %{y:.1f}<extra></extra>"
+        ),
+        row=3,
+        col=1
+    )
+    fig.add_hline(
+        y=70,
+        line=dict(color="#ef5350", width=0.8, dash="dash"),
+        row=3,
+        col=1
+    )
+    fig.add_hline(
+        y=50,
+        line=dict(color="#758696", width=0.6, dash="dot"),
+        row=3,
+        col=1
+    )
+    fig.add_hline(
+        y=30,
+        line=dict(color="#26a69a", width=0.8, dash="dash"),
+        row=3,
+        col=1
+    )
+
+    # --------------------------------------------------------
+    # MACD
+    # --------------------------------------------------------
+    macd_colors = np.where(
+        d["MACD_Hist"] >= 0,
+        "#26a69a",
+        "#ef5350"
+    )
+    fig.add_trace(
+        go.Bar(
+            x=d.index,
+            y=d["MACD_Hist"],
+            name="MACD Histogram",
+            marker_color=macd_colors,
+            showlegend=False,
+            hovertemplate="Histogram: %{y:.3f}<extra></extra>"
+        ),
+        row=4,
+        col=1
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=d.index,
+            y=d["MACD"],
+            name="MACD",
+            line=dict(color="#42a5f5", width=1.2),
+            hovertemplate="MACD: %{y:.3f}<extra></extra>"
+        ),
+        row=4,
+        col=1
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=d.index,
+            y=d["MACD_Signal"],
+            name="Signal",
+            line=dict(color="#ff7043", width=1.2),
+            hovertemplate="Signal: %{y:.3f}<extra></extra>"
+        ),
+        row=4,
+        col=1
+    )
+
+    # --------------------------------------------------------
+    # LAYOUT
+    # --------------------------------------------------------
     fig.update_layout(
-        height=820, template="plotly_dark",
-        paper_bgcolor="#0e1117", plot_bgcolor="#131722",
+        height=900,
+        template="plotly_dark",
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#131722",
         font=dict(color="#d1d4dc", size=11),
-        margin=dict(l=10, r=90, t=30, b=10),
+        margin=dict(l=10, r=92, t=42, b=10),
         xaxis_rangeslider_visible=False,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.015,
+            x=0,
+            font=dict(size=10)
+        ),
         hovermode="x unified",
         dragmode="pan",
-        uirevision=symbol,
-        hoverlabel=dict(bgcolor="#1c2129", font_size=11, bordercolor="#2a2e39")
+        uirevision=f"{symbol}-enhanced",
+        hoverlabel=dict(
+            bgcolor="#1c2129",
+            font_size=11,
+            bordercolor="#2a2e39"
+        ),
+        showlegend=True
     )
 
+    # TradingView-like grid and crosshair.
     fig.update_xaxes(
-        showspikes=True, spikemode="across", spikesnap="cursor",
-        spikecolor="#758696", spikethickness=1, spikedash="solid",
-        showgrid=True, gridcolor="#1e222d", zeroline=False
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="#758696",
+        spikethickness=1,
+        spikedash="solid",
+        showgrid=True,
+        gridcolor="#1e222d",
+        zeroline=False
     )
     fig.update_yaxes(
-        showspikes=True, spikemode="across", spikesnap="cursor",
-        spikecolor="#758696", spikethickness=1, spikedash="solid",
-        showgrid=True, gridcolor="#1e222d", zeroline=False
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="#758696",
+        spikethickness=1,
+        spikedash="solid",
+        showgrid=True,
+        gridcolor="#1e222d",
+        zeroline=False
     )
 
     fig.update_yaxes(title_text="Price", row=1, col=1)
@@ -788,6 +1125,7 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
     fig.update_yaxes(title_text="MACD", row=4, col=1)
 
+    # Range selector.
     fig.update_xaxes(
         rangeslider_visible=False,
         rangeselector=dict(
@@ -798,16 +1136,21 @@ def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_i
                 dict(count=1, label="1Y", step="year", stepmode="backward"),
                 dict(step="all", label="All")
             ],
-            bgcolor="#1c2129", activecolor="#2962ff",
+            bgcolor="#1c2129",
+            activecolor="#2962ff",
             font=dict(color="#d1d4dc", size=10),
-            x=0, y=1.08
+            x=0,
+            y=1.075
         ),
-        row=1, col=1
+        row=1,
+        col=1
     )
 
     fig.update_xaxes(
-        tickformat="%b '%y", tickfont=dict(size=10, color="#787b86"),
-        row=4, col=1
+        tickformat="%b '%y",
+        tickfont=dict(size=10, color="#787b86"),
+        row=4,
+        col=1
     )
 
     return fig
@@ -893,7 +1236,7 @@ def _render_symbol_page_inner(symbol):
             unsafe_allow_html=True
         )
 
-    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info)
+    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info, vcp)
     st.plotly_chart(
         fig,
         use_container_width=True,
