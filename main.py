@@ -51,7 +51,7 @@ IIFL_BASE_URL = "https://api.iiflcapital.com/v1"
 IIFL_LOGIN_URL = "https://markets.iiflcapital.com/?v=1&appkey=iDCmottF6T8VZr1"
 IIFL_NSE_JSON_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.json"
 IIFL_NSE_CSV_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
-EXCHANGE_FALLBACKS = ["NSEEQ", "NSE", "N"]
+EXCHANGE_FALLBACKS = ["NSEEQ"]
 
 FO_STOCKS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS",
@@ -292,10 +292,45 @@ def get_instrument_id(symbol):
 # HISTORICAL DATA
 # ============================================================
 
+def _parse_iifl_candles(raw_result):
+    """Normalize IIFL historical-data result into a list of candles."""
+    result = raw_result
+
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return None
+
+    # Some responses wrap the candle array in another object/list.
+    if isinstance(result, dict):
+        for key in ["candles", "data", "result", "records"]:
+            if key in result:
+                result = result[key]
+                break
+
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return None
+
+    if isinstance(result, list) and result:
+        if isinstance(result[0], dict) and "candles" in result[0]:
+            result = result[0]["candles"]
+        return result if isinstance(result, list) else None
+
+    return None
+
+
 def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
     headers = get_iifl_headers()
     if headers is None:
         return None, "IIFL session is not available."
+
+    if instrument_id is None or str(instrument_id).strip() == "":
+        return None, "Missing instrument ID."
+
     url = f"{IIFL_BASE_URL}/marketdata/historicaldata"
     payload = {
         "exchange": exchange,
@@ -304,6 +339,7 @@ def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
         "fromDate": from_date,
         "toDate": to_date
     }
+
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
     except Exception as e:
@@ -314,100 +350,148 @@ def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
     if response.status_code == 403:
         return None, "HTTP 403 — access denied (check Market Data entitlement)."
     if response.status_code != 200:
-        return None, f"HTTP {response.status_code}: {response.text}"
+        return None, f"HTTP {response.status_code}: {response.text[:300]}"
 
     try:
         data = response.json()
     except Exception:
-        return None, f"Invalid JSON: {response.text}"
-
-    if data.get("status") not in ("Ok", "ok", True):
-        return None, f"IIFL rejected: {data.get('message')}"
-
-    result = data.get("result")
-    if isinstance(result, str):
         try:
-            result = json.loads(result)
+            data = json.loads(response.text)
         except Exception:
-            pass
+            return None, f"Invalid JSON response: {response.text[:300]}"
 
-    candles = None
-    if isinstance(result, list) and result:
-        first = result[0]
-        if isinstance(first, dict) and "candles" in first:
-            candles = first["candles"]
-        elif isinstance(first, (list, tuple)):
-            candles = result
-    if candles is None and isinstance(result, dict):
-        for key in ["candles", "data", "result", "records"]:
-            if key in result:
-                candles = result[key]
-                break
+    # IIFL documentation notes that historical chart data may be returned
+    # as a string, so handle both JSON objects and JSON-encoded strings.
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return None, f"Unexpected string response: {data[:300]}"
 
+    if not isinstance(data, dict):
+        return None, "Unexpected IIFL response format."
+
+    status = data.get("status")
+    if status not in ("Ok", "ok", True):
+        message = str(data.get("message") or data.get("error") or "Unknown IIFL error")
+        return None, f"IIFL rejected: {message}"
+
+    candles = _parse_iifl_candles(data.get("result", data.get("data")))
     if not candles:
         return None, f"Zero candles returned for exchange='{exchange}'."
 
     return candles, None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"):
-    error_log = []
-    result = None
-    for exchange in EXCHANGE_FALLBACKS:
-        result, error = _call_historicaldata(instrument_id, exchange, from_date, to_date, interval)
-        if result is not None:
-            break
-        error_log.append((exchange, error))
-
-    if result is None:
-        return None, error_log
-
+def _candles_to_dataframe(candles):
     rows = []
-    for candle in result:
+    for candle in candles or []:
         if isinstance(candle, (list, tuple)) and len(candle) >= 6:
             try:
                 rows.append({
-                    "Date": candle[0], "Open": float(candle[1]), "High": float(candle[2]),
-                    "Low": float(candle[3]), "Close": float(candle[4]), "Volume": float(candle[5])
+                    "Date": candle[0],
+                    "Open": float(candle[1]),
+                    "High": float(candle[2]),
+                    "Low": float(candle[3]),
+                    "Close": float(candle[4]),
+                    "Volume": float(candle[5])
                 })
             except Exception:
                 continue
         elif isinstance(candle, dict):
             def gv(keys):
                 for k in keys:
-                    if k in candle:
+                    if k in candle and candle[k] is not None:
                         return candle[k]
                 return None
             try:
                 rows.append({
-                    "Date": gv(["timestamp", "time", "date"]),
-                    "Open": float(gv(["open", "Open"])), "High": float(gv(["high", "High"])),
-                    "Low": float(gv(["low", "Low"])), "Close": float(gv(["close", "Close"])),
+                    "Date": gv(["timestamp", "initialTimestamp", "time", "date", "Date"]),
+                    "Open": float(gv(["open", "Open"])),
+                    "High": float(gv(["high", "High"])),
+                    "Low": float(gv(["low", "Low"])),
+                    "Close": float(gv(["close", "Close"])),
                     "Volume": float(gv(["volume", "Volume"]))
                 })
             except Exception:
                 continue
 
     if not rows:
-        return None, [("parsing", "Candles received but could not be parsed.")]
+        return None
 
     df = pd.DataFrame(rows)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
     df = df[~df.index.duplicated(keep="last")]
-    return df[["Open", "High", "Low", "Close", "Volume"]], []
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
-def get_stock_daily_data(symbol, days=400):
+@st.cache_data(ttl=300, show_spinner=False)
+def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"):
+    """Fetch historical data in small chunks to avoid IIFL max-date-range errors."""
+    try:
+        start = datetime.strptime(from_date, "%d-%b-%Y")
+        end = datetime.strptime(to_date, "%d-%b-%Y")
+    except Exception as e:
+        return None, [("dates", f"Invalid date format: {e}")]
+
+    if start >= end:
+        return None, [("dates", "From date must be earlier than to date.")]
+
+    # IIFL can reject a long single historical request (EC809).
+    # 60 calendar-day chunks are deliberately conservative.
+    chunk_days = 60
+    all_candles = []
+    errors = []
+    current_start = start
+
+    while current_start < end:
+        current_end = min(current_start + timedelta(days=chunk_days - 1), end)
+        chunk_ok = False
+
+        # NSE cash-equity data belongs to NSEEQ. Keep fallbacks only as a
+        # compatibility path for accounts where the segment is exposed differently.
+        for exchange in EXCHANGE_FALLBACKS:
+            candles, error = _call_historicaldata(
+                instrument_id,
+                exchange,
+                current_start.strftime("%d-%b-%Y"),
+                current_end.strftime("%d-%b-%Y"),
+                interval
+            )
+            if candles is not None:
+                all_candles.extend(candles)
+                chunk_ok = True
+                break
+            errors.append((f"{exchange} {current_start:%d-%b-%Y}→{current_end:%d-%b-%Y}", error))
+
+        if not chunk_ok:
+            # Continue with later chunks so one bad/holiday range does not
+            # destroy the entire stock's history.
+            pass
+
+        current_start = current_end + timedelta(days=1)
+
+    df = _candles_to_dataframe(all_candles)
+    if df is None or df.empty:
+        return None, errors or [("historical", "No candles returned by IIFL.")]
+
+    return df, errors
+
+
+def get_stock_daily_data(symbol, days=300):
     try:
         instrument_id, details = get_instrument_id(symbol)
         if instrument_id is None:
             return None, None, [("lookup", f"No instrument found for {symbol}.")]
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         df, errors = get_iifl_historical_data(
-            instrument_id, start_date.strftime("%d-%b-%Y"), end_date.strftime("%d-%b-%Y"), "1 day"
+            instrument_id,
+            start_date.strftime("%d-%b-%Y"),
+            end_date.strftime("%d-%b-%Y"),
+            "1 day"
         )
         return df, instrument_id, errors
     except Exception as e:
@@ -625,45 +709,56 @@ def signal_badge(signal):
 
 def scan_stocks(symbols):
     results = []
+    scan_errors = []
     progress = st.progress(0)
     status = st.empty()
     total = len(symbols)
+
+    if total == 0:
+        st.session_state["scan_errors"] = [("universe", "No stocks selected for scanning.")]
+        return pd.DataFrame()
 
     for i, symbol in enumerate(symbols):
         name = symbol.replace(".NS", "")
         status.write(f"Scanning {name} ({i + 1}/{total})")
         try:
-            df, instrument_id, _ = get_stock_daily_data(symbol)
-            if df is None:
+            df, instrument_id, errors = get_stock_daily_data(symbol)
+
+            if df is None or len(df) < 100:
+                reason = errors[-1][1] if errors else "Insufficient historical data."
+                scan_errors.append((name, reason))
                 progress.progress((i + 1) / total)
                 continue
 
             analysis = analyze_vcp_engine(df)
+            if not analysis:
+                scan_errors.append((name, "VCP engine returned no analysis."))
+                progress.progress((i + 1) / total)
+                continue
 
-            if analysis:
-                # FIX: Guarantee Price exists even if vcp.py does not return it.
-                analysis["Price"] = round(float(df["Close"].iloc[-1]), 2)
+            analysis["Price"] = round(float(df["Close"].iloc[-1]), 2)
+            support, resistance = find_support_resistance(df)
+            is_breakout, breakout_info = detect_breakout(df, resistance)
+            rsi = calc_rsi(df["Close"]).iloc[-1]
+            atr = calc_atr(df).iloc[-1]
 
-                support, resistance = find_support_resistance(df)
-                is_breakout, breakout_info = detect_breakout(df, resistance)
-                rsi = calc_rsi(df["Close"]).iloc[-1]
-                atr = calc_atr(df).iloc[-1]
+            analysis["Stock"] = name
+            analysis["Symbol"] = symbol
+            analysis["Instrument ID"] = str(instrument_id)
+            analysis["RSI"] = round(float(rsi), 1)
+            analysis["ATR"] = round(float(atr), 2)
+            analysis["Breakout"] = "🚨 YES" if is_breakout else ""
+            results.append(analysis)
 
-                analysis["Stock"] = name
-                analysis["Symbol"] = symbol
-                analysis["Instrument ID"] = str(instrument_id)
-                analysis["RSI"] = round(float(rsi), 1)
-                analysis["ATR"] = round(float(atr), 2)
-                analysis["Breakout"] = "🚨 YES" if is_breakout else ""
-                results.append(analysis)
-
-        except Exception:
-            pass
+        except Exception as e:
+            # Never silently discard scanner failures.
+            scan_errors.append((name, f"{type(e).__name__}: {e}"))
 
         progress.progress((i + 1) / total)
 
     progress.empty()
     status.empty()
+    st.session_state["scan_errors"] = scan_errors
 
     if not results:
         return pd.DataFrame()
@@ -675,449 +770,112 @@ def scan_stocks(symbols):
 # TRADINGVIEW-STYLE CHART
 # ============================================================
 
-def render_tv_chart(
-    symbol,
-    df,
-    support,
-    resistance,
-    live_price=None,
-    breakout_info=None,
-    vcp=None
-):
-    """
-    Enhanced TradingView-style chart.
-
-    Improvements:
-    - VCP pivot + 5% buy-zone visualization when a valid pivot is available
-    - 20-day average volume + volume-ratio markers
-    - Recent high-volume bars highlighted
-    - Cleaner support/resistance labels
-    - VCP score/signal shown on the chart
-    - Better hover information
-    - Keeps the existing 1M/3M/6M/1Y/All controls
-    """
-    d = df.copy()
-
-    # Make sure indicators needed by the chart exist.
-    if "RSI" not in d.columns:
-        d["RSI"] = calc_rsi(d["Close"])
-    if "MACD" not in d.columns or "MACD_Signal" not in d.columns or "MACD_Hist" not in d.columns:
-        macd, signal, hist = calc_macd(d["Close"])
-        d["MACD"] = macd
-        d["MACD_Signal"] = signal
-        d["MACD_Hist"] = hist
-
-    d["Vol20"] = d["Volume"].rolling(20, min_periods=5).mean()
-    d["VolRatio20"] = d["Volume"] / d["Vol20"].replace(0, np.nan)
-
+def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_info=None):
     fig = make_subplots(
-        rows=4,
-        cols=1,
-        shared_xaxes=True,
-        row_heights=[0.54, 0.15, 0.14, 0.17],
-        vertical_spacing=0.018,
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.52, 0.14, 0.16, 0.18], vertical_spacing=0.02,
         specs=[[{}], [{}], [{}], [{}]]
     )
 
-    # --------------------------------------------------------
-    # PRICE / CANDLESTICK
-    # --------------------------------------------------------
-    fig.add_trace(
-        go.Candlestick(
-            x=d.index,
-            open=d["Open"],
-            high=d["High"],
-            low=d["Low"],
-            close=d["Close"],
-            name=symbol,
-            increasing_line_color="#26a69a",
-            decreasing_line_color="#ef5350",
-            increasing_fillcolor="#26a69a",
-            decreasing_fillcolor="#ef5350",
-            hovertext=[
-                f"{symbol.replace('.NS','')}<br>"
-                f"O: {o:.2f}<br>H: {h:.2f}<br>L: {l:.2f}<br>C: {c:.2f}<br>"
-                f"Vol: {v:,.0f}"
-                for o, h, l, c, v in zip(
-                    d["Open"], d["High"], d["Low"], d["Close"], d["Volume"]
-                )
-            ],
-            hoverinfo="text"
-        ),
-        row=1,
-        col=1
-    )
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        name=symbol, increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350"
+    ), row=1, col=1)
 
-    ema_colors = {
-        "EMA21": "#f5c542",
-        "EMA50": "#42a5f5",
-        "EMA150": "#ab47bc",
-        "EMA200": "#ff7043"
-    }
+    ema_colors = {"EMA21": "#f5c542", "EMA50": "#42a5f5", "EMA150": "#ab47bc", "EMA200": "#ff7043"}
     for ema, color in ema_colors.items():
-        if ema in d.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=d.index,
-                    y=d[ema],
-                    name=ema,
-                    mode="lines",
-                    line=dict(color=color, width=1.15),
-                    hovertemplate=f"{ema}: %{{y:.2f}}<extra></extra>"
-                ),
-                row=1,
-                col=1
-            )
+        if ema in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[ema], name=ema, line=dict(color=color, width=1.2)
+            ), row=1, col=1)
 
-    last_close = float(d["Close"].iloc[-1])
-    prev_close = float(d["Close"].iloc[-2]) if len(d) > 1 else last_close
-    close_color = "#26a69a" if last_close >= prev_close else "#ef5350"
-
-    # --------------------------------------------------------
-    # SUPPORT / RESISTANCE
-    # Only display levels that are reasonably close to the
-    # current market area to avoid turning the chart into a grid.
-    # --------------------------------------------------------
-    price_min = float(d["Low"].tail(180).min())
-    price_max = float(d["High"].tail(180).max())
-    chart_span = max(price_max - price_min, last_close * 0.05)
-
-    def level_is_relevant(level):
-        return abs(float(level) - last_close) <= chart_span * 0.85
+    last_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else last_close
+    is_up = last_close >= prev_close
+    close_color = "#26a69a" if is_up else "#ef5350"
 
     for price, touches in resistance:
-        if level_is_relevant(price):
-            fig.add_hline(
-                y=price,
-                line=dict(color="#ef5350", width=1, dash="dot"),
-                annotation_text=f"R ₹{price:.1f}  ×{touches}",
-                annotation_position="top left",
-                annotation_font_size=9,
-                row=1,
-                col=1
-            )
-
+        fig.add_hline(y=price, line=dict(color="#ef5350", width=1, dash="dot"),
+                       annotation_text=f"R {price:.1f}", annotation_font_size=10, row=1, col=1)
     for price, touches in support:
-        if level_is_relevant(price):
-            fig.add_hline(
-                y=price,
-                line=dict(color="#26a69a", width=1, dash="dot"),
-                annotation_text=f"S ₹{price:.1f}  ×{touches}",
-                annotation_position="bottom left",
-                annotation_font_size=9,
-                row=1,
-                col=1
-            )
+        fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
+                       annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
 
-    # --------------------------------------------------------
-    # VCP PIVOT + BUY ZONE
-    # Uses the VCP engine's Pivot when available.
-    # Otherwise, do not invent a pivot; the nearest resistance
-    # remains the visible breakout reference.
-    # --------------------------------------------------------
-    pivot = None
-    if isinstance(vcp, dict):
-        raw_pivot = vcp.get("Pivot")
-        try:
-            if raw_pivot is not None and np.isfinite(float(raw_pivot)):
-                pivot = float(raw_pivot)
-        except Exception:
-            pivot = None
-
-    if pivot is not None and pivot > 0:
-        buy_zone_top = pivot * 1.05
-
-        fig.add_hline(
-            y=pivot,
-            line=dict(color="#2962ff", width=1.7, dash="dash"),
-            annotation_text=f"VCP PIVOT ₹{pivot:.2f}",
-            annotation_position="top right",
-            annotation_font_size=10,
-            row=1,
-            col=1
-        )
-
-        # Shade only the 0–5% area above pivot.
-        fig.add_hrect(
-            y0=pivot,
-            y1=buy_zone_top,
-            fillcolor="#2962ff",
-            opacity=0.06,
-            line_width=0,
-            annotation_text="5% pivot zone",
-            annotation_position="top left",
-            row=1,
-            col=1
-        )
-
-    # --------------------------------------------------------
-    # CURRENT PRICE / LIVE PRICE LABELS
-    # --------------------------------------------------------
-    fig.add_hline(
-        y=last_close,
-        line=dict(color=close_color, width=0.8, dash="dot"),
-        opacity=0.55,
-        row=1,
-        col=1
-    )
     fig.add_annotation(
-        xref="paper",
-        x=1.0,
-        yref="y",
-        y=last_close,
-        xanchor="left",
-        yanchor="middle",
-        text=f"  ₹{last_close:.2f}  ",
-        showarrow=False,
-        bgcolor=close_color,
-        font=dict(color="#0e1117", size=11, family="monospace"),
-        borderpad=2,
-        row=1,
-        col=1
+        xref="paper", x=1.0, yref="y", y=last_close,
+        xanchor="left", yanchor="middle",
+        text=f"  {last_close:.2f}  ",
+        showarrow=False, bgcolor=close_color, font=dict(color="#0e1117", size=11, family="monospace"),
+        borderpad=2, row=1, col=1
     )
 
-    if live_price is not None:
-        try:
-            live_price = float(live_price)
-            live_color = "#26a69a" if live_price >= last_close else "#ef5350"
-            fig.add_hline(
-                y=live_price,
-                line=dict(color="#2962ff", width=1.4),
-                row=1,
-                col=1
-            )
-            fig.add_annotation(
-                xref="paper",
-                x=1.0,
-                yref="y",
-                y=live_price,
-                xanchor="left",
-                yanchor="middle",
-                text=f"  LTP ₹{live_price:.2f}  ",
-                showarrow=False,
-                bgcolor="#2962ff",
-                font=dict(color="#ffffff", size=10, family="monospace"),
-                borderpad=2,
-                row=1,
-                col=1
-            )
-        except Exception:
-            pass
+    if live_price:
+        live_color = "#26a69a" if live_price >= last_close else "#ef5350"
+        fig.add_hline(y=live_price, line=dict(color="#2962ff", width=1.3, dash="solid"), row=1, col=1)
+        fig.add_annotation(
+            xref="paper", x=1.0, yref="y", y=live_price,
+            xanchor="left", yanchor="middle",
+            text=f"  LTP {live_price:.2f}  ",
+            showarrow=False, bgcolor="#2962ff", font=dict(color="#ffffff", size=11, family="monospace"),
+            borderpad=2, row=1, col=1
+        )
 
-    # Watermark
     fig.add_annotation(
-        xref="paper",
-        yref="paper",
-        x=0.5,
-        y=0.72,
+        xref="paper", yref="paper", x=0.5, y=0.72,
         text=symbol.replace(".NS", ""),
-        showarrow=False,
-        font=dict(color="rgba(255,255,255,0.045)", size=72),
-        row=1,
-        col=1
+        showarrow=False, font=dict(color="rgba(255,255,255,0.05)", size=72),
+        row=1, col=1
     )
-
-    # VCP status badge
-    if isinstance(vcp, dict):
-        vcp_score = vcp.get("Score")
-        vcp_signal = vcp.get("Signal")
-        if vcp_signal:
-            score_text = f" • Score {vcp_score}" if vcp_score is not None else ""
-            fig.add_annotation(
-                xref="paper",
-                yref="paper",
-                x=0.01,
-                y=0.98,
-                text=f"<b>{vcp_signal}</b>{score_text}",
-                showarrow=False,
-                bgcolor="#1c2129",
-                bordercolor="#39414d",
-                borderwidth=1,
-                borderpad=5,
-                font=dict(size=11, color="#d1d4dc"),
-                xanchor="left",
-                yanchor="top"
-            )
 
     if breakout_info:
         fig.add_annotation(
-            x=d.index[-1],
-            y=float(d["High"].iloc[-1]) * 1.025,
-            text="🚨 BREAKOUT",
-            showarrow=True,
-            arrowhead=2,
-            ax=0,
-            ay=-35,
-            font=dict(color="#ff5c7a", size=12),
-            row=1,
-            col=1
+            x=df.index[-1], y=df["High"].iloc[-1] * 1.02,
+            text="🚨 BREAKOUT", showarrow=True, arrowhead=2,
+            font=dict(color="#ff5c7a", size=12), row=1, col=1
         )
 
-    # --------------------------------------------------------
-    # VOLUME
-    # --------------------------------------------------------
-    volume_colors = np.where(
-        d["Close"] >= d["Open"],
-        "#26a69a",
-        "#ef5350"
-    )
+    volume_colors = np.where(df["Close"] >= df["Open"], "#26a69a", "#ef5350")
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
+                          marker_color=volume_colors, showlegend=False), row=2, col=1)
 
-    # Highlight unusually high volume (>1.5x 20D average).
-    high_volume = d["VolRatio20"] >= 1.5
-    volume_colors = np.where(high_volume, "#f5c542", volume_colors)
+    if "RSI" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
+                                  line=dict(color="#f5c542", width=1.3)), row=3, col=1)
+        fig.add_hline(y=70, line=dict(color="#ef5350", width=0.8, dash="dash"), row=3, col=1)
+        fig.add_hline(y=30, line=dict(color="#26a69a", width=0.8, dash="dash"), row=3, col=1)
 
-    fig.add_trace(
-        go.Bar(
-            x=d.index,
-            y=d["Volume"],
-            name="Volume",
-            marker_color=volume_colors,
-            showlegend=False,
-            hovertemplate="Volume: %{y:,.0f}<extra></extra>"
-        ),
-        row=2,
-        col=1
-    )
+    if "MACD" in df.columns:
+        macd_colors = np.where(df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
+        fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="MACD Hist",
+                              marker_color=macd_colors, showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD",
+                                  line=dict(color="#42a5f5", width=1.2)), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal",
+                                  line=dict(color="#ff7043", width=1.2)), row=4, col=1)
 
-    fig.add_trace(
-        go.Scatter(
-            x=d.index,
-            y=d["Vol20"],
-            name="20D Avg Volume",
-            line=dict(color="#9aa4b2", width=1.2),
-            hovertemplate="20D Avg Vol: %{y:,.0f}<extra></extra>"
-        ),
-        row=2,
-        col=1
-    )
-
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
-    fig.add_trace(
-        go.Scatter(
-            x=d.index,
-            y=d["RSI"],
-            name="RSI 14",
-            line=dict(color="#f5c542", width=1.35),
-            hovertemplate="RSI: %{y:.1f}<extra></extra>"
-        ),
-        row=3,
-        col=1
-    )
-    fig.add_hline(
-        y=70,
-        line=dict(color="#ef5350", width=0.8, dash="dash"),
-        row=3,
-        col=1
-    )
-    fig.add_hline(
-        y=50,
-        line=dict(color="#758696", width=0.6, dash="dot"),
-        row=3,
-        col=1
-    )
-    fig.add_hline(
-        y=30,
-        line=dict(color="#26a69a", width=0.8, dash="dash"),
-        row=3,
-        col=1
-    )
-
-    # --------------------------------------------------------
-    # MACD
-    # --------------------------------------------------------
-    macd_colors = np.where(
-        d["MACD_Hist"] >= 0,
-        "#26a69a",
-        "#ef5350"
-    )
-    fig.add_trace(
-        go.Bar(
-            x=d.index,
-            y=d["MACD_Hist"],
-            name="MACD Histogram",
-            marker_color=macd_colors,
-            showlegend=False,
-            hovertemplate="Histogram: %{y:.3f}<extra></extra>"
-        ),
-        row=4,
-        col=1
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=d.index,
-            y=d["MACD"],
-            name="MACD",
-            line=dict(color="#42a5f5", width=1.2),
-            hovertemplate="MACD: %{y:.3f}<extra></extra>"
-        ),
-        row=4,
-        col=1
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=d.index,
-            y=d["MACD_Signal"],
-            name="Signal",
-            line=dict(color="#ff7043", width=1.2),
-            hovertemplate="Signal: %{y:.3f}<extra></extra>"
-        ),
-        row=4,
-        col=1
-    )
-
-    # --------------------------------------------------------
-    # LAYOUT
-    # --------------------------------------------------------
     fig.update_layout(
-        height=900,
-        template="plotly_dark",
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#131722",
+        height=820, template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#131722",
         font=dict(color="#d1d4dc", size=11),
-        margin=dict(l=10, r=92, t=42, b=10),
+        margin=dict(l=10, r=90, t=30, b=10),
         xaxis_rangeslider_visible=False,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.015,
-            x=0,
-            font=dict(size=10)
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
         hovermode="x unified",
         dragmode="pan",
-        uirevision=f"{symbol}-enhanced",
-        hoverlabel=dict(
-            bgcolor="#1c2129",
-            font_size=11,
-            bordercolor="#2a2e39"
-        ),
-        showlegend=True
+        uirevision=symbol,
+        hoverlabel=dict(bgcolor="#1c2129", font_size=11, bordercolor="#2a2e39")
     )
 
-    # TradingView-like grid and crosshair.
     fig.update_xaxes(
-        showspikes=True,
-        spikemode="across",
-        spikesnap="cursor",
-        spikecolor="#758696",
-        spikethickness=1,
-        spikedash="solid",
-        showgrid=True,
-        gridcolor="#1e222d",
-        zeroline=False
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
     )
     fig.update_yaxes(
-        showspikes=True,
-        spikemode="across",
-        spikesnap="cursor",
-        spikecolor="#758696",
-        spikethickness=1,
-        spikedash="solid",
-        showgrid=True,
-        gridcolor="#1e222d",
-        zeroline=False
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
     )
 
     fig.update_yaxes(title_text="Price", row=1, col=1)
@@ -1125,7 +883,6 @@ def render_tv_chart(
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
     fig.update_yaxes(title_text="MACD", row=4, col=1)
 
-    # Range selector.
     fig.update_xaxes(
         rangeslider_visible=False,
         rangeselector=dict(
@@ -1136,21 +893,16 @@ def render_tv_chart(
                 dict(count=1, label="1Y", step="year", stepmode="backward"),
                 dict(step="all", label="All")
             ],
-            bgcolor="#1c2129",
-            activecolor="#2962ff",
+            bgcolor="#1c2129", activecolor="#2962ff",
             font=dict(color="#d1d4dc", size=10),
-            x=0,
-            y=1.075
+            x=0, y=1.08
         ),
-        row=1,
-        col=1
+        row=1, col=1
     )
 
     fig.update_xaxes(
-        tickformat="%b '%y",
-        tickfont=dict(size=10, color="#787b86"),
-        row=4,
-        col=1
+        tickformat="%b '%y", tickfont=dict(size=10, color="#787b86"),
+        row=4, col=1
     )
 
     return fig
@@ -1236,7 +988,7 @@ def _render_symbol_page_inner(symbol):
             unsafe_allow_html=True
         )
 
-    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info, vcp)
+    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info)
     st.plotly_chart(
         fig,
         use_container_width=True,
@@ -1371,18 +1123,18 @@ if page == "🏠 Overview":
         """)
     else:
         st.success("🟢 Connected to IIFL — use the sidebar to scan or explore charts.")
-        if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
-            results = st.session_state["scan_results"]
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Stocks scanned", len(results))
-            c2.metric("Strong VCP", int((results["Signal"] == "STRONG VCP").sum()))
-            c3.metric("VCP Watch", int((results["Signal"] == "VCP WATCH").sum()))
-            c4.metric("Breakouts", int((results["Breakout"] == "🚨 YES").sum()))
-            st.markdown("### Top 5 setups from last scan")
-            st.dataframe(results.head(5)[["Stock", "Price", "Score", "Signal", "Breakout"]],
-                        use_container_width=True, hide_index=True)
-        else:
-            st.info("No scan results yet — run the **🔍 VCP Scanner** page first.")
+    if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
+        results = st.session_state["scan_results"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Stocks scanned", len(results))
+        c2.metric("Strong VCP", int((results["Signal"] == "STRONG VCP").sum()))
+        c3.metric("VCP Watch", int((results["Signal"] == "VCP WATCH").sum()))
+        c4.metric("Breakouts", int((results["Breakout"] == "🚨 YES").sum()))
+        st.markdown("### Top 5 setups from last scan")
+        st.dataframe(results.head(5)[["Stock", "Price", "Score", "Signal", "Breakout"]],
+                    use_container_width=True, hide_index=True)
+    else:
+        st.info("No scan results yet — run the **🔍 VCP Scanner** page first.")
 
 # ============================================================
 # PAGE: SCANNER
@@ -1403,6 +1155,17 @@ elif page == "🔍 VCP Scanner":
     if scan_button:
         with st.spinner(f"Scanning {len(active_stocks)} stocks..."):
             st.session_state["scan_results"] = scan_stocks(active_stocks)
+
+    if scan_button:
+        errors = st.session_state.get("scan_errors", [])
+        if errors:
+            st.warning(f"⚠️ {len(errors)} stocks were skipped. Open the diagnostics below.")
+            with st.expander("🔧 Scan diagnostics", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(errors, columns=["Stock", "Reason"]),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
         results = st.session_state["scan_results"]
