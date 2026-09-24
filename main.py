@@ -697,6 +697,33 @@ def analyze_vcp_old(df):
     }
 
 
+def analyze_vcp_safe(df):
+    """Run the external VCP engine, with a safe fallback.
+
+    The current vcp.py can raise errors such as:
+    TypeError: cannot unpack non-iterable bool object
+    A single broken VCP-engine implementation should never cause the
+    entire market scan to fail, so the scanner falls back to the built-in
+    analyzer when the external engine fails or returns an invalid type.
+    """
+    try:
+        result = analyze_vcp_engine(df)
+
+        # Accept the normal dictionary result.
+        if isinstance(result, dict):
+            return result
+
+        # Be tolerant if a future engine version returns (analysis, meta).
+        if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], dict):
+            return result[0]
+
+    except Exception:
+        pass
+
+    # Stable built-in fallback used by the scanner.
+    return analyze_vcp_old(df)
+
+
 def signal_badge(signal):
     m = {"STRONG VCP": "badge-strong", "VCP WATCH": "badge-watch",
          "DEVELOPING": "badge-dev", "NO SETUP": "badge-none"}
@@ -730,7 +757,7 @@ def scan_stocks(symbols):
                 progress.progress((i + 1) / total)
                 continue
 
-            analysis = analyze_vcp_engine(df)
+            analysis = analyze_vcp_safe(df)
             if not analysis:
                 scan_errors.append((name, "VCP engine returned no analysis."))
                 progress.progress((i + 1) / total)
@@ -953,7 +980,7 @@ def _render_symbol_page_inner(symbol):
     is_breakout, breakout_info = detect_breakout(df, resistance)
 
     # FIX: use the imported VCP engine consistently.
-    vcp = analyze_vcp_engine(df)
+    vcp = analyze_vcp_safe(df)
 
     col_refresh, col_metrics = st.columns([1, 5])
     with col_refresh:
