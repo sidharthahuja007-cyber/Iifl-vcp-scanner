@@ -793,7 +793,9 @@ def load_nse_equity_universe():
                 x = x.drop_duplicates("SYMBOL").sort_values("SYMBOL").reset_index(drop=True)
 
                 if len(x) >= 500:
-                    return x
+                    # Always return (dataframe, error) because the caller
+                    # unpacks two values: nse_df, nse_error = ...
+                    return x, ""
                 last_error = f"Only {len(x)} NSE symbols returned"
             except Exception as e:
                 last_error = str(e)
