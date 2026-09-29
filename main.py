@@ -22,9 +22,10 @@ from plotly.subplots import make_subplots
 # 2. Keep your existing vcp.py in the same repository if used
 #    elsewhere. This file contains its own VCP engine, so the
 #    scanner remains usable even if vcp.py is unavailable.
-# 3. Fundamentals are imported from a Screener.in CSV export.
-#    IIFL market-data APIs provide price/volume data, not the
-#    full fundamental dataset required by this scoring model.
+# 3. Screener.in fundamentals are OPTIONAL. If no fundamentals file
+#    is uploaded, the scanner automatically runs in technical/VCP mode
+#    using the live NSE equity universe + IIFL historical OHLCV data.
+# 4. The existing market_data.py remains the preferred IIFL adapter.
 # ============================================================
 
 st.set_page_config(
@@ -66,6 +67,11 @@ st.markdown("""
 # -----------------------------
 DEFAULT_HISTORY_DAYS = 400
 MIN_HISTORY_ROWS = 120
+NSE_EQUITY_URLS = [
+    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
+    "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+]
+NSE_HOME = "https://www.nseindia.com/"
 
 SCREENER_QUERY = """Market Capitalization > 500
 AND Sales growth 3Years > 15
@@ -733,6 +739,84 @@ def classify(total, hard_gate, vcp, breakout):
 
 
 # ============================================================
+# NSE equity universe
+# ============================================================
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def load_nse_equity_universe():
+    """Load the current NSE equity master and return normal NSE EQ symbols.
+
+    NSE can reject a plain CSV request, so the app first warms a browser-like
+    session by visiting the NSE home page. If the live list cannot be fetched,
+    the function returns an empty DataFrame and the UI lets the user use the
+    manual watchlist or an uploaded Screener CSV.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": NSE_HOME,
+        "Connection": "keep-alive",
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        try:
+            session.get(NSE_HOME, timeout=12)
+        except Exception:
+            pass
+
+        last_error = ""
+        for url in NSE_EQUITY_URLS:
+            try:
+                r = session.get(url, timeout=20, headers={"Referer": NSE_HOME})
+                if r.status_code != 200 or len(r.content) < 1000:
+                    last_error = f"HTTP {r.status_code} from NSE"
+                    continue
+
+                x = pd.read_csv(io.BytesIO(r.content))
+                x.columns = [str(c).strip().upper() for c in x.columns]
+                if "SYMBOL" not in x.columns:
+                    last_error = "NSE file has no SYMBOL column"
+                    continue
+
+                if "SERIES" in x.columns:
+                    x["SERIES"] = x["SERIES"].astype(str).str.upper().str.strip()
+                    x = x[x["SERIES"].isin(["EQ"])].copy()
+
+                x["SYMBOL"] = x["SYMBOL"].astype(str).map(normalize_symbol)
+                x = x[(x["SYMBOL"] != "") & (~x["SYMBOL"].isin(["NAN", "NONE"]))]
+                x = x.drop_duplicates("SYMBOL").sort_values("SYMBOL").reset_index(drop=True)
+
+                if len(x) >= 500:
+                    return x
+                last_error = f"Only {len(x)} NSE symbols returned"
+            except Exception as e:
+                last_error = str(e)
+
+        return pd.DataFrame(columns=["SYMBOL"]), last_error
+    except Exception as e:
+        return pd.DataFrame(columns=["SYMBOL"]), str(e)
+
+
+def build_symbol_universe(nse_df, fund_df=None, fund_resolved=None, mode="NSE EQ"):
+    """Build the actual scan list from NSE, Screener, or manual symbols."""
+    if mode == "NSE EQ" and nse_df is not None and not nse_df.empty:
+        return nse_df["SYMBOL"].dropna().map(normalize_symbol).drop_duplicates().tolist()
+
+    if mode == "Screener CSV" and fund_df is not None and fund_resolved:
+        col = fund_resolved.get("symbol")
+        if col and "_symbol_norm" in fund_df.columns:
+            return fund_df["_symbol_norm"].dropna().drop_duplicates().tolist()
+
+    return []
+
+
+# ============================================================
 # IIFL compatibility layer
 # ============================================================
 
@@ -835,6 +919,7 @@ def call_existing_history(md, symbol, instrument_id, days):
         return None, "No compatible historical-data function found in market_data.py."
 
     attempts = [
+        {"symbol": symbol, "days": days},
         {"symbol": symbol, "instrument_id": instrument_id, "days": days},
         {"symbol": symbol, "instrumentId": instrument_id, "days": days},
         {"instrument_id": instrument_id, "days": days},
@@ -883,6 +968,7 @@ def parse_price_csv(uploaded):
         return None
 
     try:
+        uploaded.seek(0)
         x = pd.read_csv(uploaded)
     except Exception:
         uploaded.seek(0)
@@ -1041,8 +1127,8 @@ history_days = st.sidebar.slider(
 )
 
 min_score = st.sidebar.slider(
-    "Minimum Champion Score",
-    min_value=40,
+    "Minimum score to highlight",
+    min_value=0,
     max_value=95,
     value=70,
     step=5,
@@ -1063,16 +1149,38 @@ show_chart = st.sidebar.checkbox(
     value=True,
 )
 
-st.sidebar.divider()
-st.sidebar.markdown("### Screener.in Fundamental Filter")
-st.sidebar.code(SCREENER_QUERY, language="text")
+max_symbols = st.sidebar.selectbox(
+    "Maximum stocks to scan",
+    options=[50, 100, 250, 500, 1000, 2000],
+    index=2,
+    help="Each stock normally needs an IIFL historical-data request. Start with 50–250 while testing.",
+)
 
-st.sidebar.markdown(
-    "Export the results of this query from Screener.in as CSV and upload it below."
+st.sidebar.divider()
+st.sidebar.markdown("### 1️⃣ Stock universe")
+
+universe_mode = st.sidebar.radio(
+    "Choose scan universe",
+    ["Automatic NSE EQ", "Manual watchlist", "Screener CSV"],
+    index=0,
+)
+
+refresh_nse = st.sidebar.button(
+    "🔄 Refresh NSE universe",
+    use_container_width=True,
+    help="Refreshes the NSE equity master. It is otherwise cached for 24 hours.",
+)
+
+if refresh_nse:
+    load_nse_equity_universe.clear()
+
+st.sidebar.markdown("### 2️⃣ Optional fundamentals")
+st.sidebar.caption(
+    "Screener.in is optional. Without it, the app runs technical/VCP mode using NSE + IIFL."
 )
 
 fund_file = st.sidebar.file_uploader(
-    "Upload Screener.in CSV",
+    "Optional Screener.in CSV / XLSX",
     type=["csv", "xlsx"],
     key="fundamental_csv",
 )
@@ -1083,18 +1191,17 @@ price_file = st.sidebar.file_uploader(
     key="price_csv",
 )
 
+st.sidebar.divider()
+st.sidebar.markdown("### Screener query (optional)")
+st.sidebar.code(SCREENER_QUERY, language="text")
+
 # ============================================================
 # Header
 # ============================================================
 
 st.title("📈 IIFL VCP Champion Scanner")
 st.caption(
-    "Minervini-style Fundamental + Trend + VCP + Pivot + Breakout scoring"
-)
-
-st.info(
-    "Workflow: Screener.in fundamentals → IIFL daily OHLCV → Trend Template → "
-    "VCP contractions → volume dry-up → pivot → breakout → 100-point score."
+    "NSE universe + IIFL price data, with optional fundamentals, Trend Template, VCP, Pivot and Breakout scoring"
 )
 
 # ============================================================
@@ -1106,6 +1213,7 @@ fund_resolved = {}
 
 if fund_file is not None:
     try:
+        fund_file.seek(0)
         if fund_file.name.lower().endswith(".csv"):
             fund_df = pd.read_csv(fund_file)
         else:
@@ -1124,38 +1232,100 @@ if fund_file is not None:
         st.error(f"Could not read fundamental file: {e}")
 
 # ============================================================
+# NSE universe
+# ============================================================
+
+nse_df, nse_error = load_nse_equity_universe()
+
+if not nse_df.empty:
+    st.success(f"NSE universe ready: {len(nse_df):,} EQ symbols available.")
+else:
+    st.warning(
+        "Could not load the live NSE equity master right now. "
+        "Use Manual watchlist or upload a Screener CSV. "
+        f"NSE message: {nse_error}"
+    )
+
+# ============================================================
 # Data source
 # ============================================================
 
 md = try_import_market_data()
 
 if md is None:
-    st.warning(
-        "market_data.py was not found. Your scanner can still analyze an uploaded "
-        "price CSV, but IIFL automatic scanning requires your existing market_data.py."
+    st.error(
+        "market_data.py was not found. Put your existing IIFL market_data.py in the same GitHub repository as main.py. "
+        "The NSE universe can load without it, but historical IIFL candles require the IIFL data adapter."
     )
+else:
+    history_fn = discover_history_function(md)
+    if history_fn is None:
+        st.error("market_data.py was found, but no supported historical-data function was detected.")
+    else:
+        st.success(f"IIFL data adapter ready: `{history_fn.__name__}()`")
 
 # ============================================================
-# Watchlist
+# Watchlist / universe selection
 # ============================================================
 
-watchlist_text = st.text_area(
-    "Watchlist / NSE symbols",
-    value="",
+manual_text = st.text_area(
+    "Manual NSE symbols (used only in Manual watchlist mode)",
+    value="RELIANCE, TCS, HDFCBANK, ICICIBANK, BHARTIARTL",
     height=100,
     placeholder="RELIANCE, TCS, HDFCBANK, ICICIBANK, BHARTIARTL",
 )
 
-if watchlist_text.strip():
+if universe_mode == "Automatic NSE EQ":
+    symbols = build_symbol_universe(nse_df, mode="NSE EQ")
+    source_label = "NSE EQ universe"
+elif universe_mode == "Screener CSV":
+    symbols = build_symbol_universe(
+        nse_df,
+        fund_df=fund_df,
+        fund_resolved=fund_resolved,
+        mode="Screener CSV",
+    )
+    source_label = "Screener CSV"
+else:
     symbols = [
         normalize_symbol(s)
-        for s in re.split(r"[,\\s]+", watchlist_text.strip())
+        for s in re.split(r"[,\s]+", manual_text.strip())
         if s.strip()
     ]
-elif fund_df is not None and fund_resolved.get("symbol"):
-    symbols = fund_df["_symbol_norm"].dropna().drop_duplicates().tolist()
+    symbols = list(dict.fromkeys(symbols))
+    source_label = "Manual watchlist"
+
+# Keep only symbols that are present in the NSE EQ master when it is available.
+# This removes stale/invalid symbols before making IIFL requests.
+if universe_mode == "Manual watchlist" and not nse_df.empty:
+    valid_nse = set(nse_df["SYMBOL"].tolist())
+    original_count = len(symbols)
+    symbols = [s for s in symbols if s in valid_nse]
+    removed = original_count - len(symbols)
+    if removed:
+        st.warning(f"Removed {removed} symbol(s) not found in the current NSE EQ master.")
+
+if symbols:
+    available = len(symbols)
+    st.info(
+        f"Selected source: **{source_label}** | Available: **{available:,}** | "
+        f"Will scan up to **{min(max_symbols, available):,}** stocks."
+    )
 else:
-    symbols = []
+    st.warning("No symbols selected. Refresh the NSE universe or choose Manual watchlist / Screener CSV.")
+
+# Technical-only mode is automatic when no fundamentals are supplied.
+technical_only = fund_df is None or not fund_resolved.get("symbol")
+if technical_only:
+    st.info(
+        "🟦 **Technical/VCP mode:** no Screener fundamentals uploaded. "
+        "The scanner will calculate Trend /20 + VCP /30 + Breakout /10 = **60-point technical score**. "
+        "Upload fundamentals later to enable the full 100-point Champion score."
+    )
+else:
+    st.info(
+        "🟩 **Full Champion mode:** Fundamental /40 + Trend /20 + VCP /30 + Breakout /10 = **100 points**."
+    )
 
 # ============================================================
 # Analyze single symbol
@@ -1198,6 +1368,7 @@ def analyze_symbol(symbol):
         return {
             "Symbol": symbol,
             "Total": fscore,
+            "Technical": 0,
             "Fundamental": fscore,
             "Trend": 0,
             "VCP": 0,
@@ -1222,22 +1393,33 @@ def analyze_symbol(symbol):
         pivot = vcp.get("pivot", np.nan) if vcp.get("valid") else np.nan
         brk = calculate_breakout_score(price_df, pivot)
 
-        total = int(
+        technical_score = int(
             min(
-                100,
-                fscore
-                + trend["trend_score"]
+                60,
+                trend["trend_score"]
                 + vcp.get("vcp_score", 0)
                 + brk["score"],
             )
         )
 
-        status = classify(
-            total,
-            trend["hard_gate"],
-            vcp.get("vcp_score", 0),
-            brk["score"],
-        )
+        if technical_only:
+            total = technical_score
+            status = "TECHNICAL"
+            if trend["hard_gate"] and vcp.get("contraction_count", 0) >= 3:
+                if brk.get("breakout", False):
+                    status = "TECH BREAKOUT"
+                elif pd.notna(vcp.get("distance_to_pivot", np.nan)) and vcp.get("distance_to_pivot", np.nan) <= 7:
+                    status = "TECH READY"
+                else:
+                    status = "TECH WATCH"
+        else:
+            total = int(min(100, fscore + technical_score))
+            status = classify(
+                total,
+                trend["hard_gate"],
+                vcp.get("vcp_score", 0),
+                brk["score"],
+            )
 
         if require_trend and not trend["hard_gate"]:
             status = "TREND FAIL"
@@ -1248,6 +1430,7 @@ def analyze_symbol(symbol):
         return {
             "Symbol": symbol,
             "Total": total,
+            "Technical": int(min(60, trend["trend_score"] + vcp.get("vcp_score", 0) + brk["score"])),
             "Fundamental": fscore,
             "Trend": trend["trend_score"],
             "VCP": vcp.get("vcp_score", 0),
@@ -1272,6 +1455,7 @@ def analyze_symbol(symbol):
         return {
             "Symbol": symbol,
             "Total": fscore,
+            "Technical": 0,
             "Fundamental": fscore,
             "Trend": 0,
             "VCP": 0,
@@ -1296,8 +1480,8 @@ def analyze_symbol(symbol):
 
 if not symbols:
     st.warning(
-        "Enter symbols above or upload a Screener.in CSV. "
-        "For automatic IIFL scanning, keep your existing market_data.py in the repository."
+        "No stocks are ready to scan. Choose Automatic NSE EQ, enter a Manual watchlist, "
+        "or upload a Screener CSV."
     )
 
 run = st.button("🚀 RUN CHAMPION SCAN", type="primary", use_container_width=True)
@@ -1307,9 +1491,13 @@ if run:
         st.error("No symbols to scan.")
         st.stop()
 
-    if len(symbols) > 250:
-        st.warning("Scanning the first 250 symbols to avoid excessive API requests.")
-        symbols = symbols[:250]
+    scan_limit = min(max_symbols, len(symbols))
+    if len(symbols) > scan_limit:
+        st.warning(
+            f"Scanning the first {scan_limit} of {len(symbols):,} selected symbols. "
+            "Increase 'Maximum stocks to scan' when you are ready for a larger run."
+        )
+        symbols = symbols[:scan_limit]
 
     results = []
     progress = st.progress(0)
@@ -1339,6 +1527,7 @@ if results:
             {
                 "Symbol": r["Symbol"],
                 "Score": r["Total"],
+                "Technical": r.get("Technical", 0),
                 "Fund": r["Fundamental"],
                 "Trend": r["Trend"],
                 "VCP": r["VCP"],
@@ -1366,14 +1555,15 @@ if results:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Stocks scanned", len(table))
-    c2.metric("≥70 score", int((table["Score"] >= 70).sum()))
-    c3.metric("≥80 score", int((table["Score"] >= 80).sum()))
-    c4.metric("Breakouts", int((table["Setup"] == "BREAKOUT").sum()))
+    c2.metric("Above selected score", int((table["Score"] >= min_score).sum()))
+    c3.metric("Trend pass", int((table["Trend"] >= 14).sum()))
+    c4.metric("VCP 3+", int((table["VCP"] >= 16).sum()))
 
     st.dataframe(
         table.style.format(
             {
                 "Score": "{:.0f}",
+                "Technical": "{:.0f}",
                 "Fund": "{:.0f}",
                 "Trend": "{:.0f}",
                 "VCP": "{:.0f}",
@@ -1412,12 +1602,16 @@ if results:
         r = selected_result
 
         # Score header.
-        h1, h2, h3, h4, h5 = st.columns(5)
-        h1.metric("Champion Score", f'{r["Total"]}/100')
+        h1, h2, h3, h4, h5, h6 = st.columns(6)
+        if technical_only:
+            h1.metric("Technical Score", f'{r["Total"]}/60')
+        else:
+            h1.metric("Champion Score", f'{r["Total"]}/100')
         h2.metric("Fundamental", f'{r["Fundamental"]}/40')
         h3.metric("Trend", f'{r["Trend"]}/20')
         h4.metric("VCP", f'{r["VCP"]}/30')
         h5.metric("Breakout", f'{r["Breakout"]}/10')
+        h6.metric("Pivot", f'₹{r.get("Pivot", np.nan):,.2f}')
 
         st.markdown(
             f"### {r['Symbol']} — **{r['Status']}** | Setup: **{r['Setup']}**"
@@ -1469,10 +1663,16 @@ if results:
             )
             st.dataframe(fd, use_container_width=True, hide_index=True)
         else:
-            st.info(
-                "No matching Screener.in fundamental row was found. "
-                "Upload the Screener CSV and make sure its symbol column contains NSE symbols."
-            )
+            if technical_only:
+                st.info(
+                    "Fundamentals are optional. This scan is running from the NSE universe + IIFL price/volume data. "
+                    "Upload a fundamentals CSV later to activate the /40 Fundamental component."
+                )
+            else:
+                st.info(
+                    "No matching fundamental row was found for this symbol. "
+                    "Check the symbol column in the uploaded CSV."
+                )
 
         if r.get("Error"):
             st.warning(r["Error"])
@@ -1483,7 +1683,22 @@ if results:
 
 with st.expander("📚 Scoring methodology", expanded=False):
     st.markdown("""
-### 100-point model
+### Two operating modes
+
+**Technical/VCP mode — no Screener file required**
+- Trend Template — 20
+- VCP — 30
+- Breakout — 10
+- Technical score = **60 points**
+
+**Full Champion mode — optional fundamentals uploaded**
+- Fundamental Leadership — 40
+- Trend Template — 20
+- VCP — 30
+- Breakout — 10
+- Champion score = **100 points**
+
+### Fundamental component
 
 **Fundamental Leadership — 40**
 - 3Y Sales >20% = 5
@@ -1525,5 +1740,5 @@ with st.expander("📚 Scoring methodology", expanded=False):
 """)
 
 st.caption(
-    "This scanner is a research/decision-support tool. A high score is not a guarantee of future performance."
+    "Screener.in is optional. Automatic mode uses the NSE EQ universe for symbols and your IIFL market-data adapter for historical OHLCV. This scanner is a research/decision-support tool; a high score is not a guarantee of future performance."
 )
