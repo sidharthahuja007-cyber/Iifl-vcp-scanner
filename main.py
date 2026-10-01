@@ -2,1745 +2,1259 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import json
 import hashlib
+import json
 import traceback
-import re
-import io
-import time
-from datetime import datetime, timedelta
-
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+from io import StringIO
+from vcp import analyze as analyze_vcp_engine
 
 # ============================================================
-# IIFL VCP CHAMPION SCANNER
-# Minervini-style Fundamental + Trend + VCP + Pivot scoring
-#
-# IMPORTANT:
-# 1. Keep your existing market_data.py in the same repository.
-# 2. Keep your existing vcp.py in the same repository if used
-#    elsewhere. This file contains its own VCP engine, so the
-#    scanner remains usable even if vcp.py is unavailable.
-# 3. Screener.in fundamentals are OPTIONAL. If no fundamentals file
-#    is uploaded, the scanner automatically runs in technical/VCP mode
-#    using the live NSE equity universe + IIFL historical OHLCV data.
-# 4. The existing market_data.py remains the preferred IIFL adapter.
+# PAGE CONFIG + THEME
 # ============================================================
 
+# CORRECTED SINGLE-FILE VERSION: direct IIFL NSEEQ historical-data adapter
 st.set_page_config(
-    page_title="IIFL VCP Champion Scanner",
+    page_title="IIFL VCP Terminal",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="expanded"
 )
 
-# -----------------------------
-# Styling
-# -----------------------------
 st.markdown("""
 <style>
-.stApp { background:#0e1117; }
-.block-container { padding-top:1.2rem; }
-.metric-card {
-    background:#151a22;
-    border:1px solid #293241;
-    border-radius:12px;
-    padding:14px;
-    margin-bottom:8px;
-}
-.score-big { font-size:32px; font-weight:800; }
-.small-muted { color:#9aa4b2; font-size:12px; }
-.badge {
-    display:inline-block;
-    padding:5px 10px;
-    border-radius:999px;
-    font-weight:700;
-    font-size:12px;
-    border:1px solid #374151;
-}
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #161b22; border: 1px solid #262d38;
+                border-radius: 10px; padding: 12px 16px; }
+    div[data-testid="stMetricValue"] { font-size: 1.4rem; }
+    .block-container { padding-top: 1.5rem; }
+    .stButton>button { border-radius: 6px; }
+    .signal-badge {
+        display: inline-block; padding: 3px 10px; border-radius: 12px;
+        font-size: 0.75rem; font-weight: 600; margin-right: 4px;
+    }
+    .badge-strong { background:#0d3b28; color:#3fd68c; }
+    .badge-watch  { background:#3a2e05; color:#e0b23c; }
+    .badge-dev    { background:#1c2b4a; color:#5b8def; }
+    .badge-none   { background:#2a2a2a; color:#888; }
+    .badge-breakout { background:#4a1520; color:#ff5c7a; }
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
-# Constants
-# -----------------------------
-DEFAULT_HISTORY_DAYS = 400
-MIN_HISTORY_ROWS = 120
-NSE_EQUITY_URLS = [
-    "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv",
-    "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
+# ============================================================
+# IIFL CONFIGURATION
+# ============================================================
+
+IIFL_BASE_URL = "https://api.iiflcapital.com/v1"
+IIFL_LOGIN_URL = "https://markets.iiflcapital.com/?v=1&appkey=iDCmottF6T8VZr1"
+IIFL_NSE_JSON_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.json"
+IIFL_NSE_CSV_URL = f"{IIFL_BASE_URL}/contractfiles/NSEEQ.csv"
+EXCHANGE_FALLBACKS = ["NSEEQ"]
+
+FO_STOCKS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "ITC.NS",
+    "SBIN.NS", "BHARTIARTL.NS", "LT.NS", "AXISBANK.NS", "KOTAKBANK.NS",
+    "HINDUNILVR.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS", "BAJFINANCE.NS",
+    "BAJAJFINSV.NS", "ADANIENT.NS", "ADANIPORTS.NS", "NTPC.NS", "POWERGRID.NS",
+    "BEL.NS", "HAL.NS", "BHEL.NS", "TRENT.NS", "DIXON.NS", "CDSL.NS", "MCX.NS",
+    "POLYCAB.NS", "PERSISTENT.NS", "COFORGE.NS", "JUBLFOOD.NS", "PIDILITIND.NS",
+    "DEEPAKNTR.NS", "SRF.NS", "TATAELXSI.NS", "MUTHOOTFIN.NS", "SHRIRAMFIN.NS",
+    "AUROPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS", "LUPIN.NS",
+    "ZYDUSLIFE.NS", "ABB.NS", "ABBOTINDIA.NS", "ABCAPITAL.NS", "ABFRL.NS",
+    "ACC.NS", "ALKEM.NS", "AMBUJACEM.NS", "APLAPOLLO.NS", "APOLLOHOSP.NS",
+    "APOLLOTYRE.NS", "ASHOKLEY.NS", "ASIANPAINT.NS", "ASTRAL.NS", "ATUL.NS",
+    "AUBANK.NS", "BAJAJ-AUTO.NS", "BALKRISIND.NS", "BALRAMCHIN.NS",
+    "BANDHANBNK.NS", "BANKBARODA.NS", "BATAINDIA.NS", "BERGEPAINT.NS",
+    "BHARATFORG.NS", "BIOCON.NS", "BOSCHLTD.NS", "BPCL.NS", "BRITANNIA.NS",
+    "CAMS.NS", "CANBK.NS", "CHOLAFIN.NS", "COALINDIA.NS", "COLPAL.NS",
+    "CONCOR.NS", "COROMANDEL.NS", "CROMPTON.NS", "CUMMINSIND.NS", "DABUR.NS",
+    "DALBHARAT.NS", "DELHIVERY.NS", "DLF.NS", "EICHERMOT.NS", "ESCORTS.NS",
+    "EXIDEIND.NS", "FEDERALBNK.NS", "GAIL.NS", "GLENMARK.NS", "GMRINFRA.NS",
+    "GODREJCP.NS", "GODREJPROP.NS", "GRASIM.NS", "HAVELLS.NS", "HCLTECH.NS",
+    "HDFCAMC.NS", "HDFCLIFE.NS", "HEROMOTOCO.NS", "HINDALCO.NS", "HINDPETRO.NS",
+    "ICICIGI.NS", "ICICIPRULI.NS", "IDFCFIRSTB.NS", "IEX.NS", "IGL.NS",
+    "INDHOTEL.NS", "INDIAMART.NS", "INDIGO.NS", "INDUSINDBK.NS", "INDUSTOWER.NS",
+    "IOC.NS", "IRCTC.NS", "IRFC.NS", "JINDALSTEL.NS", "JSWENERGY.NS",
+    "JSWSTEEL.NS", "KALYANKJIL.NS", "L&TFH.NS", "LICHSGFIN.NS", "LICI.NS",
+    "LODHA.NS", "LTIM.NS", "M&M.NS", "M&MFIN.NS", "MARICO.NS", "MFSL.NS",
+    "MOTHERSON.NS", "MPHASIS.NS", "NATIONALUM.NS", "NAUKRI.NS", "NESTLEIND.NS",
+    "NMDC.NS", "OBEROIRLTY.NS", "OFSS.NS", "ONGC.NS", "PAGEIND.NS", "PATANJALI.NS",
+    "PEL.NS", "PETRONET.NS", "PFC.NS", "PHOENIXLTD.NS", "PIIND.NS", "PNB.NS",
+    "RECLTD.NS", "SAIL.NS", "SBICARD.NS", "SBILIFE.NS", "SHREECEM.NS",
+    "SIEMENS.NS", "SUNTV.NS", "TATACHEM.NS", "TATACOMM.NS", "TATACONSUM.NS",
+    "TATAMOTORS.NS", "TATAPOWER.NS", "TATASTEEL.NS", "TECHM.NS", "TIINDIA.NS",
+    "TORNTPHARM.NS", "TORNTPOWER.NS", "TVSMOTOR.NS", "UBL.NS", "UPL.NS",
+    "VBL.NS", "VEDL.NS", "VOLTAS.NS", "WIPRO.NS", "ZOMATO.NS"
 ]
-NSE_HOME = "https://www.nseindia.com/"
+FO_STOCKS = list(dict.fromkeys(FO_STOCKS))
 
-SCREENER_QUERY = """Market Capitalization > 500
-AND Sales growth 3Years > 15
-AND Profit growth 3Years > 20
-AND Sales latest quarter > Sales preceding year quarter
-AND Net Profit latest quarter > Net Profit preceding year quarter
-AND EPS latest quarter > EPS preceding year quarter
-AND Return on equity > 15
-AND Average return on equity 3Years > 15
-AND Return on capital employed > 15
-AND Average return on capital employed 5Years > 15
-AND Debt to equity < 0.5
-AND Cash from operations last year > 0
-AND Pledged percentage < 5
-AND Current price > DMA 50
-AND DMA 50 > DMA 200
-AND DMA 200 > DMA 200 previous day
-AND Up from 52w low > 30
-AND Down from 52w high < 20
-AND Current price > 50"""
+
+def mask(token, keep=4):
+    if not token:
+        return "None"
+    token = str(token)
+    if len(token) <= keep * 2:
+        return "*" * len(token)
+    return token[:keep] + "..." + token[-keep:]
+
 
 # ============================================================
-# Helpers
+# AUTH
 # ============================================================
 
-def clean_num(x):
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return np.nan
-    if isinstance(x, (int, float, np.number)):
-        return float(x)
-    s = str(x).strip().replace(",", "").replace("%", "")
-    if s in ("", "-", "—", "nan", "None", "NA", "N/A"):
-        return np.nan
-    mult = 1.0
-    if s.endswith("Cr"):
-        s = s[:-2]
-    if s.endswith("L"):
-        s = s[:-1]
-        mult = 0.01
+def get_iifl_user_session(authcode, clientid):
     try:
-        return float(s) * mult
+        app_secret = st.secrets["IIFL_APP_SECRET"]
     except Exception:
-        return np.nan
+        st.error("IIFL_APP_SECRET is missing from Streamlit Secrets.")
+        return None
+    try:
+        checksum_string = str(clientid) + str(authcode) + str(app_secret)
+        checksum = hashlib.sha256(checksum_string.encode("utf-8")).hexdigest()
+        response = requests.post(
+            f"{IIFL_BASE_URL}/getusersession", json={"checkSum": checksum}, timeout=30
+        )
+        if response.status_code != 200:
+            st.error(f"IIFL login HTTP error: {response.status_code}")
+            return None
+        data = response.json()
+        if data.get("status") == "Ok":
+            session = data.get("userSession")
+            if session:
+                return session
+        st.error("IIFL did not return a user session.")
+        return None
+    except Exception as e:
+        st.error(f"IIFL authentication error: {e}")
+        return None
+
+
+query_params = st.query_params
+authcode = query_params.get("authcode") or query_params.get("authCode")
+clientid = query_params.get("clientid") or query_params.get("clientId")
+
+if authcode and clientid and "iifl_user_session" not in st.session_state:
+    with st.spinner("🔐 Connecting to IIFL..."):
+        user_session = get_iifl_user_session(authcode, clientid)
+    if user_session:
+        st.session_state["iifl_user_session"] = user_session
+        st.session_state["iifl_client_id"] = clientid
+        st.query_params.clear()
+        st.rerun()
+
+
+def get_iifl_headers():
+    session = st.session_state.get("iifl_user_session")
+    if not session:
+        return None
+    return {
+        "Authorization": f"Bearer {session}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+
+
+# ============================================================
+# INSTRUMENT MASTER + LOOKUP
+# ============================================================
+
+@st.cache_data(ttl=86400)
+def load_iifl_nse_instruments():
+    try:
+        r = requests.get(IIFL_NSE_JSON_URL, timeout=30)
+        if r.status_code == 200:
+            raw = r.json()
+            records = None
+            if isinstance(raw, list):
+                records = raw
+            elif isinstance(raw, dict):
+                for key in ["result", "data", "instruments", "records"]:
+                    if key in raw and isinstance(raw[key], list):
+                        records = raw[key]
+                        break
+            if records:
+                df = pd.DataFrame(records)
+                if not df.empty:
+                    return df
+    except Exception:
+        pass
+    try:
+        r = requests.get(IIFL_NSE_CSV_URL, timeout=30)
+        if r.status_code == 200:
+            df = pd.read_csv(StringIO(r.text))
+            if not df.empty:
+                return df
+    except Exception:
+        pass
+    return None
 
 
 def normalize_symbol(symbol):
-    if symbol is None:
-        return ""
-    s = str(symbol).strip().upper()
-    s = re.sub(r"\.(NS|NSE)$", "", s)
-    s = re.sub(r"[-_]?EQ$", "", s)
-    s = s.replace(" ", "")
-    return s
+    symbol = str(symbol).upper().strip()
+    return (symbol.replace(".NS", "").replace(".NSE", "")
+            .replace("-EQ", "").replace("_EQ", "").replace(" EQ", "").strip())
 
 
-def first_existing(df, names):
-    for n in names:
-        if n in df.columns:
-            return n
+def find_instrument_id(record):
+    if not isinstance(record, dict):
+        return None
+    for key in ["instrumentId", "InstrumentId", "instrumentID", "instrument_id",
+                "NSEInstrumentId", "securityId", "scripCode", "token"]:
+        if key in record:
+            value = record[key]
+            if value is not None and str(value).strip() not in ["", "nan", "None"]:
+                return str(value)
+    for key, value in record.items():
+        if "instrumentid" in str(key).lower().replace("_", "") and value is not None:
+            return str(value)
     return None
 
 
-def pct_change(a, b):
-    if b is None or pd.isna(b) or b == 0:
-        return np.nan
-    return (a / b - 1.0) * 100.0
-
-
-# ============================================================
-# Technical indicators
-# ============================================================
-
-def add_indicators(df):
-    x = df.copy()
-    x = x.sort_values("Date").reset_index(drop=True)
-
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-
-    x["DMA20"] = x["Close"].rolling(20).mean()
-    x["DMA50"] = x["Close"].rolling(50).mean()
-    x["DMA200"] = x["Close"].rolling(200).mean()
-    x["High52"] = x["High"].rolling(252).max()
-    x["Low52"] = x["Low"].rolling(252).min()
-
-    x["ATR14"] = atr(x, 14)
-    x["AvgVol20"] = x["Volume"].rolling(20).mean()
-    x["AvgVol50"] = x["Volume"].rolling(50).mean()
-
-    delta = x["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    x["RSI14"] = 100 - (100 / (1 + rs))
-
-    x["Return20"] = x["Close"].pct_change(20) * 100
-    x["Return60"] = x["Close"].pct_change(60) * 100
-
-    return x
-
-
-def atr(df, period=14):
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-    prev = close.shift(1)
-    tr = pd.concat(
-        [
-            high - low,
-            (high - prev).abs(),
-            (low - prev).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-# ============================================================
-# VCP ENGINE
-# ============================================================
-
-def local_pivots(df, window=5):
-    high = df["High"]
-    lows = df["Low"]
-
-    swing_high = high[(high == high.rolling(window * 2 + 1, center=True).max())]
-    swing_low = lows[(lows == lows.rolling(window * 2 + 1, center=True).min())]
-
-    return swing_high.dropna(), swing_low.dropna()
-
-
-def find_base_and_pivot(df):
-    """
-    Detect a practical consolidation base from the recent history.
-    The algorithm is deliberately conservative:
-    - looks at the most recent 60-160 sessions
-    - identifies the highest high
-    - measures corrections from that high
-    - chooses a pivot near the upper part of the recent base
-    """
-    x = df.dropna(subset=["High", "Low", "Close"]).copy()
-    if len(x) < 80:
-        return {
-            "base_start": None,
-            "base_end": None,
-            "pivot": np.nan,
-            "base_high": np.nan,
-            "base_low": np.nan,
-        }
-
-    end = len(x) - 1
-    lookback = min(160, len(x))
-    start = max(0, len(x) - lookback)
-    w = x.iloc[start:].copy()
-
-    # Highest high in the recent base-search window.
-    base_high = float(w["High"].max())
-    high_idx = w["High"].idxmax()
-
-    # Prefer a recent high if the absolute high is too old.
-    recent60 = x.iloc[max(0, len(x)-60):]
-    recent_high = float(recent60["High"].max())
-
-    if pd.notna(recent_high):
-        base_high = recent_high
-
-    # Low of the recent consolidation.
-    base_low = float(w["Low"].min())
-
-    # Pivot: highest high of the final 20 sessions, excluding the
-    # current day to reduce look-ahead when used as a pre-breakout setup.
-    prior = x.iloc[max(0, len(x)-21):-1]
-    if len(prior) >= 5:
-        pivot = float(prior["High"].max())
-    else:
-        pivot = float(x["High"].iloc[-1])
-
-    # Base dates.
-    return {
-        "base_start": w["Date"].iloc[0],
-        "base_end": w["Date"].iloc[-1],
-        "pivot": pivot,
-        "base_high": base_high,
-        "base_low": base_low,
-    }
-
-
-def contraction_depths(df, pivot, max_depths=5):
-    """
-    Find meaningful pullbacks inside the recent base.
-    Each contraction is measured as:
-    (swing high - following swing low) / swing high.
-    """
-    x = df.copy().reset_index(drop=True)
-    if len(x) < 60 or not np.isfinite(pivot):
-        return []
-
-    # Work on recent 160 bars.
-    x = x.iloc[-min(160, len(x)):].reset_index(drop=True)
-
-    # Smooth high/low lightly to reduce one-day noise.
-    x["HH"] = x["High"].rolling(3, center=True).max()
-    x["LL"] = x["Low"].rolling(3, center=True).min()
-
-    # Candidate local peaks.
-    peaks = []
-    for i in range(3, len(x)-3):
-        if x.loc[i, "High"] >= x.loc[i-3:i+3, "High"].max():
-            peaks.append(i)
-
-    contractions = []
-    for p in peaks:
-        # Search for the lowest low after the peak before another
-        # meaningful rally / end of the window.
-        end = min(len(x)-1, p + 35)
-        if end <= p + 4:
+def find_iifl_instrument(symbol):
+    instruments = load_iifl_nse_instruments()
+    if instruments is None:
+        return None
+    target = normalize_symbol(symbol)
+    for column in instruments.columns:
+        try:
+            values = instruments[column].astype(str).str.upper().str.strip()
+            normalized = (values.str.replace(".NS", "", regex=False)
+                          .str.replace("-EQ", "", regex=False)
+                          .str.replace("_EQ", "", regex=False)
+                          .str.replace(" EQ", "", regex=False).str.strip())
+            match = instruments[normalized == target]
+            if not match.empty:
+                return match.iloc[0]
+        except Exception:
             continue
+    return None
 
-        segment = x.iloc[p+1:end+1]
-        if segment.empty:
-            continue
 
-        low_idx = segment["Low"].idxmin()
-        low_price = float(segment.loc[low_idx, "Low"])
-        high_price = float(x.loc[p, "High"])
-
-        if high_price <= 0:
-            continue
-
-        depth = (high_price - low_price) / high_price * 100.0
-
-        # Ignore tiny noise corrections and huge bear-market-like drops.
-        if 2.0 <= depth <= 40.0:
-            contractions.append(
-                {
-                    "peak_index": p,
-                    "low_index": int(low_idx),
-                    "depth": depth,
-                }
-            )
-
-    # Keep distinct contractions separated in time.
-    contractions = sorted(contractions, key=lambda z: z["low_index"])
-    filtered = []
-    for c in contractions:
-        if not filtered or c["low_index"] - filtered[-1]["low_index"] >= 5:
-            filtered.append(c)
-        elif c["depth"] > filtered[-1]["depth"]:
-            filtered[-1] = c
-
-    # Prefer the latest sequence of up to 5 contractions.
-    return filtered[-max_depths:]
-
-
-def calculate_vcp(df):
-    x = add_indicators(df)
-
-    if len(x) < MIN_HISTORY_ROWS:
-        return {
-            "valid": False,
-            "reason": f"Need at least {MIN_HISTORY_ROWS} daily candles.",
-        }
-
-    base = find_base_and_pivot(x)
-    pivot = base["pivot"]
-    close = float(x["Close"].iloc[-1])
-
-    contractions = contraction_depths(x, pivot)
-
-    depths = [float(c["depth"]) for c in contractions[-5:]]
-
-    # A VCP needs at least three meaningful contractions for this model.
-    count = len(depths)
-
-    decreasing_pairs = 0
-    if count >= 2:
-        for i in range(1, count):
-            if depths[i] < depths[i-1]:
-                decreasing_pairs += 1
-
-    strict_decreasing = count >= 3 and decreasing_pairs >= count - 1
-
-    final_contraction = depths[-1] if depths else np.nan
-    first_contraction = depths[0] if depths else np.nan
-
-    # Price tightness near current price.
-    last5 = x.tail(5)
-    last10 = x.tail(10)
-    tight5 = pct_change(last5["High"].max(), last5["Low"].min())
-    tight10 = pct_change(last10["High"].max(), last10["Low"].min())
-
-    # pct_change(max high, min low) is not a range percentage,
-    # so use explicit denominator.
-    tight5 = (
-        (last5["High"].max() - last5["Low"].min())
-        / last5["Low"].min() * 100
-        if last5["Low"].min() > 0 else np.nan
-    )
-    tight10 = (
-        (last10["High"].max() - last10["Low"].min())
-        / last10["Low"].min() * 100
-        if last10["Low"].min() > 0 else np.nan
-    )
-
-    # Volume dry-up: compare recent 10-session average with
-    # the preceding 40-session average.
-    recent_vol = x["Volume"].tail(10).mean()
-    prior_vol = x["Volume"].tail(50).head(40).mean()
-
-    if prior_vol and prior_vol > 0:
-        volume_dryup = max(0.0, (1 - recent_vol / prior_vol) * 100)
-    else:
-        volume_dryup = np.nan
-
-    # Base position: where current price sits inside the recent base.
-    base_low = base["base_low"]
-    base_high = base["base_high"]
-    if base_high > base_low:
-        base_position = (close - base_low) / (base_high - base_low) * 100
-    else:
-        base_position = np.nan
-
-    # Distance from pivot.
-    distance_to_pivot = (pivot - close) / pivot * 100 if pivot > 0 else np.nan
-
-    # VCP score = 30.
-    vcp_score = 0.0
-
-    # A. Contraction sequence — 8
-    if count >= 4:
-        vcp_score += 5
-    elif count >= 3:
-        vcp_score += 4
-
-    if strict_decreasing:
-        vcp_score += 3
-
-    # B. Depth contraction — 6
-    if count >= 3:
-        if strict_decreasing and final_contraction <= 8:
-            vcp_score += 6
-        elif strict_decreasing and final_contraction <= 12:
-            vcp_score += 5
-        elif strict_decreasing:
-            vcp_score += 4
-        elif final_contraction < first_contraction:
-            vcp_score += 3
-
-    # C. Price tightness — 5
-    if pd.notna(tight5) and tight5 <= 3:
-        vcp_score += 3
-    elif pd.notna(tight10) and tight10 <= 5:
-        vcp_score += 2
-
-    # Add tightness bonus only when reasonably controlled.
-    if pd.notna(tight10) and tight10 <= 5:
-        vcp_score += 2
-    elif pd.notna(tight10) and tight10 <= 8:
-        vcp_score += 1
-
-    vcp_score = min(vcp_score, 25)  # reserve volume/base points below
-
-    # D. Volume dry-up — 5
-    volume_points = 0
-    if pd.notna(volume_dryup):
-        if volume_dryup >= 40:
-            volume_points = 5
-        elif volume_dryup >= 25:
-            volume_points = 4
-        elif volume_dryup >= 10:
-            volume_points = 2
-        elif volume_dryup >= 0:
-            volume_points = 1
-
-    # E. Base position — 3
-    position_points = 0
-    if pd.notna(base_position):
-        if base_position >= 80:
-            position_points = 3
-        elif base_position >= 70:
-            position_points = 2
-        elif base_position >= 50:
-            position_points = 1
-
-    # F. Base duration — 3
-    # Use available recent history as a practical approximation.
-    duration_days = min(160, len(x))
-    if duration_days >= 42:
-        duration_points = 3
-    elif duration_days >= 28:
-        duration_points = 2
-    elif duration_days >= 21:
-        duration_points = 1
-    else:
-        duration_points = 0
-
-    # The base score above may be <=25. Add remaining components.
-    vcp_score += volume_points + position_points + duration_points
-    vcp_score = min(30, float(vcp_score))
-
-    # Setup status.
-    if pd.isna(distance_to_pivot):
-        setup = "NO PIVOT"
-    elif close > pivot:
-        setup = "BREAKOUT"
-    elif distance_to_pivot <= 3:
-        setup = "PRIME"
-    elif distance_to_pivot <= 7:
-        setup = "READY"
-    elif distance_to_pivot <= 12:
-        setup = "DEVELOPING"
-    else:
-        setup = "TOO EARLY"
-
-    return {
-        "valid": True,
-        "pivot": pivot,
-        "close": close,
-        "distance_to_pivot": distance_to_pivot,
-        "contractions": depths,
-        "contraction_count": count,
-        "strict_decreasing": strict_decreasing,
-        "first_contraction": first_contraction,
-        "final_contraction": final_contraction,
-        "tight5": tight5,
-        "tight10": tight10,
-        "volume_dryup": volume_dryup,
-        "base_position": base_position,
-        "duration_days": duration_days,
-        "vcp_score": vcp_score,
-        "setup": setup,
-        "base_start": base["base_start"],
-        "base_end": base["base_end"],
-        "base_high": base_high,
-        "base_low": base_low,
-    }
-
-
-# ============================================================
-# Trend score — 20
-# ============================================================
-
-def calculate_trend_score(df):
-    x = add_indicators(df)
-    r = x.iloc[-1]
-
-    score = 0
-    checks = {}
-
-    checks["Price > 50 DMA"] = bool(r["Close"] > r["DMA50"]) if pd.notna(r["DMA50"]) else False
-    checks["50 DMA > 200 DMA"] = bool(r["DMA50"] > r["DMA200"]) if pd.notna(r["DMA200"]) else False
-
-    if len(x) >= 201 and pd.notna(x["DMA200"].iloc[-1]) and pd.notna(x["DMA200"].iloc[-21]):
-        checks["200 DMA rising"] = bool(x["DMA200"].iloc[-1] > x["DMA200"].iloc[-21])
-    else:
-        checks["200 DMA rising"] = False
-
-    checks["Price > 200 DMA"] = bool(r["Close"] > r["DMA200"]) if pd.notna(r["DMA200"]) else False
-
-    checks["Within 20% of 52W high"] = (
-        bool(r["Close"] >= r["High52"] * 0.80)
-        if pd.notna(r["High52"]) else False
-    )
-
-    checks[">30% above 52W low"] = (
-        bool(r["Close"] >= r["Low52"] * 1.30)
-        if pd.notna(r["Low52"]) else False
-    )
-
-    # 20/50 structure
-    checks["20 DMA > 50 DMA"] = (
-        bool(r["DMA20"] > r["DMA50"])
-        if pd.notna(r["DMA20"]) and pd.notna(r["DMA50"]) else False
-    )
-
-    checks["RS / momentum positive"] = (
-        bool(r["Return60"] > 0)
-        if pd.notna(r["Return60"]) else False
-    )
-
-    score += 3 if checks["Price > 50 DMA"] else 0
-    score += 4 if checks["50 DMA > 200 DMA"] else 0
-    score += 3 if checks["200 DMA rising"] else 0
-    score += 2 if checks["Price > 200 DMA"] else 0
-    score += 3 if checks["Within 20% of 52W high"] else 0
-    score += 2 if checks[">30% above 52W low"] else 0
-    score += 2 if checks["20 DMA > 50 DMA"] else 0
-    score += 1 if checks["RS / momentum positive"] else 0
-
-    hard_gate = (
-        checks["Price > 50 DMA"]
-        and checks["50 DMA > 200 DMA"]
-        and checks["200 DMA rising"]
-    )
-
-    return {
-        "trend_score": int(score),
-        "hard_gate": hard_gate,
-        "checks": checks,
-        "dma20": r["DMA20"],
-        "dma50": r["DMA50"],
-        "dma200": r["DMA200"],
-        "high52": r["High52"],
-        "low52": r["Low52"],
-        "rsi": r["RSI14"],
-    }
-
-
-# ============================================================
-# Breakout score — 10
-# ============================================================
-
-def calculate_breakout_score(df, pivot):
-    x = add_indicators(df)
-    r = x.iloc[-1]
-
-    if not np.isfinite(pivot) or pivot <= 0:
-        return {"score": 0, "breakout": False, "volume_ratio": np.nan}
-
-    volume_ratio = (
-        r["Volume"] / r["AvgVol50"]
-        if pd.notna(r["AvgVol50"]) and r["AvgVol50"] > 0
-        else np.nan
-    )
-
-    breakout = bool(r["Close"] > pivot)
-    score = 0
-
-    if breakout:
-        score += 3
-
-    if pd.notna(volume_ratio):
-        if volume_ratio >= 2.0:
-            score += 4
-        elif volume_ratio >= 1.5:
-            score += 3
-
-    day_range = r["High"] - r["Low"]
-    if day_range > 0:
-        close_strength = (r["Close"] - r["Low"]) / day_range * 100
-    else:
-        close_strength = 50
-
-    if close_strength >= 80:
-        score += 2
-
-    # Tight breakout base bonus.
-    if breakout and len(x) >= 10:
-        rng10 = (
-            (x["High"].tail(10).max() - x["Low"].tail(10).min())
-            / x["Low"].tail(10).min() * 100
-            if x["Low"].tail(10).min() > 0 else np.nan
-        )
-        if pd.notna(rng10) and rng10 <= 8:
-            score += 1
-
-    return {
-        "score": min(10, int(score)),
-        "breakout": breakout,
-        "volume_ratio": volume_ratio,
-        "close_strength": close_strength,
-    }
-
-
-# ============================================================
-# Fundamental scoring — 40
-# ============================================================
-
-def prepare_fundamental_df(df):
-    x = df.copy()
-    x.columns = [
-        re.sub(r"[^a-z0-9]+", "_", str(c).strip().lower()).strip("_")
-        for c in x.columns
-    ]
-
-    # Common Screener column aliases.
-    aliases = {
-        "symbol": ["symbol", "nse_code", "nsecode", "security_name", "name", "company"],
-        "market_cap": ["market_cap", "market_capitalization", "mar_cap_rs_cr"],
-        "sales_growth_3y": ["sales_growth_3years", "sales_growth_3years_pct", "sales_growth_3y"],
-        "profit_growth_3y": ["profit_growth_3years", "profit_growth_3years_pct", "profit_growth_3y"],
-        "sales_qoq_yoy": ["yoy_quarterly_sales_growth", "sales_qtr_var", "quarterly_sales_growth"],
-        "profit_qoq_yoy": ["yoy_quarterly_profit_growth", "qtr_profit_var", "quarterly_profit_growth"],
-        "eps_qoq_yoy": ["eps_latest_quarter_growth", "yoy_quarterly_eps_growth", "eps_growth"],
-        "roe": ["return_on_equity", "roe", "roe_percent"],
-        "roe_3y": ["average_return_on_equity_3years", "roe_3yr_avg", "roe_3y"],
-        "roce": ["return_on_capital_employed", "roce", "roce_percent"],
-        "roce_5y": ["average_return_on_capital_employed_5years", "roce_5yr_avg", "roce_5y"],
-        "de": ["debt_to_equity", "debt_equity", "d_e"],
-        "pledge": ["pledged_percentage", "pledge", "promoter_pledge"],
-        "cfo": ["cash_from_operations_last_year", "cash_from_operating_activity", "cfo"],
-    }
-
-    resolved = {}
-    for key, opts in aliases.items():
-        resolved[key] = first_existing(x, opts)
-
-    return x, resolved
-
-
-def get_row_value(row, resolved, key):
-    col = resolved.get(key)
-    if col is None or col not in row.index:
-        return np.nan
-    return clean_num(row[col])
-
-
-def fundamental_score(row, resolved):
-    # 40 points exactly.
-    s = 0
-    details = {}
-
-    sales3 = get_row_value(row, resolved, "sales_growth_3y")
-    profit3 = get_row_value(row, resolved, "profit_growth_3y")
-    salesq = get_row_value(row, resolved, "sales_qoq_yoy")
-    profitq = get_row_value(row, resolved, "profit_qoq_yoy")
-    epsq = get_row_value(row, resolved, "eps_qoq_yoy")
-    roe = get_row_value(row, resolved, "roe")
-    roe3 = get_row_value(row, resolved, "roe_3y")
-    roce = get_row_value(row, resolved, "roce")
-    roce5 = get_row_value(row, resolved, "roce_5y")
-    de = get_row_value(row, resolved, "de")
-    pledge = get_row_value(row, resolved, "pledge")
-    cfo = get_row_value(row, resolved, "cfo")
-
-    details["3Y Sales >20%"] = 5 if pd.notna(sales3) and sales3 > 20 else 0
-    details["3Y Profit >25%"] = 5 if pd.notna(profit3) and profit3 > 25 else 0
-    details["Quarter Sales >20%"] = 5 if pd.notna(salesq) and salesq > 20 else 0
-    details["Quarter EPS >20%"] = 5 if pd.notna(epsq) and epsq > 20 else 0
-    details["Quarter Profit >20%"] = 5 if pd.notna(profitq) and profitq > 20 else 0
-
-    details["ROE >20%"] = 3 if pd.notna(roe) and roe > 20 else 0
-    if details["ROE >20%"] == 0 and pd.notna(roe3) and roe3 > 20:
-        details["ROE >20%"] = 3
-
-    details["ROCE >20%"] = 3 if pd.notna(roce) and roce > 20 else 0
-    if details["ROCE >20%"] == 0 and pd.notna(roce5) and roce5 > 20:
-        details["ROCE >20%"] = 3
-
-    details["D/E <0.5"] = 3 if pd.notna(de) and de < 0.5 else 0
-    details["Positive CFO"] = 3 if pd.notna(cfo) and cfo > 0 else 0
-    details["Pledge <5%"] = 3 if pd.notna(pledge) and pledge < 5 else 0
-
-    s = sum(details.values())
-
-    return int(min(40, s)), details
-
-
-# ============================================================
-# Champion classification
-# ============================================================
-
-def classify(total, hard_gate, vcp, breakout):
-    if not hard_gate:
-        return "TREND FAIL"
-    if total >= 90 and vcp >= 24:
-        return "CHAMPION"
-    if total >= 80 and vcp >= 20:
-        return "A+ SETUP"
-    if total >= 70 and vcp >= 16:
-        return "WATCH"
-    if total >= 60:
-        return "DEVELOPING"
-    return "IGNORE"
-
-
-# ============================================================
-# NSE equity universe
-# ============================================================
-
-@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
-def load_nse_equity_universe():
-    """Load the current NSE equity master and return normal NSE EQ symbols.
-
-    NSE can reject a plain CSV request, so the app first warms a browser-like
-    session by visiting the NSE home page. If the live list cannot be fetched,
-    the function returns an empty DataFrame and the UI lets the user use the
-    manual watchlist or an uploaded Screener CSV.
-    """
+@st.cache_data(ttl=86400)
+def fetch_nse_index_list(index_csv_url):
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
-            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer": NSE_HOME,
-        "Connection": "keep-alive",
+        "Accept": "text/csv,*/*",
+        "Referer": "https://www.nseindia.com/"
     }
-
-    session = requests.Session()
-    session.headers.update(headers)
-
     try:
-        try:
-            session.get(NSE_HOME, timeout=12)
-        except Exception:
-            pass
-
-        last_error = ""
-        for url in NSE_EQUITY_URLS:
-            try:
-                r = session.get(url, timeout=20, headers={"Referer": NSE_HOME})
-                if r.status_code != 200 or len(r.content) < 1000:
-                    last_error = f"HTTP {r.status_code} from NSE"
-                    continue
-
-                x = pd.read_csv(io.BytesIO(r.content))
-                x.columns = [str(c).strip().upper() for c in x.columns]
-                if "SYMBOL" not in x.columns:
-                    last_error = "NSE file has no SYMBOL column"
-                    continue
-
-                if "SERIES" in x.columns:
-                    x["SERIES"] = x["SERIES"].astype(str).str.upper().str.strip()
-                    x = x[x["SERIES"].isin(["EQ"])].copy()
-
-                x["SYMBOL"] = x["SYMBOL"].astype(str).map(normalize_symbol)
-                x = x[(x["SYMBOL"] != "") & (~x["SYMBOL"].isin(["NAN", "NONE"]))]
-                x = x.drop_duplicates("SYMBOL").sort_values("SYMBOL").reset_index(drop=True)
-
-                if len(x) >= 500:
-                    # Always return (dataframe, error) because the caller
-                    # unpacks two values: nse_df, nse_error = ...
-                    return x, ""
-                last_error = f"Only {len(x)} NSE symbols returned"
-            except Exception as e:
-                last_error = str(e)
-
-        return pd.DataFrame(columns=["SYMBOL"]), last_error
-    except Exception as e:
-        return pd.DataFrame(columns=["SYMBOL"]), str(e)
-
-
-def build_symbol_universe(nse_df, fund_df=None, fund_resolved=None, mode="NSE EQ"):
-    """Build the actual scan list from NSE, Screener, or manual symbols."""
-    if mode == "NSE EQ" and nse_df is not None and not nse_df.empty:
-        return nse_df["SYMBOL"].dropna().map(normalize_symbol).drop_duplicates().tolist()
-
-    if mode == "Screener CSV" and fund_df is not None and fund_resolved:
-        col = fund_resolved.get("symbol")
-        if col and "_symbol_norm" in fund_df.columns:
-            return fund_df["_symbol_norm"].dropna().drop_duplicates().tolist()
-
-    return []
-
-
-# ============================================================
-# IIFL compatibility layer
-# ============================================================
-
-def try_import_market_data():
-    try:
-        import market_data
-        return market_data
+        r = requests.get(index_csv_url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        df.columns = [c.strip() for c in df.columns]
+        symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
+        if symbol_col is None:
+            return None
+        symbols = df[symbol_col].astype(str).str.strip().dropna().unique().tolist()
+        return sorted(set(f"{s}.NS" for s in symbols if s and s.upper() != "SYMBOL"))
     except Exception:
         return None
 
 
-def discover_history_function(md):
-    """
-    Supports several likely names from the user's existing
-    market_data.py without forcing a rewrite of that module.
-    """
-    if md is None:
-        return None
+def parse_uploaded_symbol_csv(uploaded_file):
+    try:
+        content = uploaded_file.read().decode("utf-8", errors="ignore")
+        try:
+            df = pd.read_csv(StringIO(content))
+            symbol_col = next((c for c in df.columns if "SYMBOL" in c.upper()), None)
+            if symbol_col:
+                symbols = df[symbol_col].astype(str).str.strip().dropna().unique().tolist()
+                return sorted(set(
+                    s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
+                    for s in symbols if s and s.upper() != "SYMBOL"
+                ))
+        except Exception:
+            pass
+        lines = [l.strip() for l in content.splitlines() if l.strip()]
+        return sorted(set(
+            s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
+            for s in lines
+        ))
+    except Exception:
+        return []
 
-    names = [
-        "get_historical_data",
-        "fetch_historical_data",
-        "get_history",
-        "fetch_history",
-        "historical_data",
-        "get_daily_history",
-        "fetch_daily_history",
-    ]
 
-    for name in names:
-        fn = getattr(md, name, None)
-        if callable(fn):
-            return fn
+def get_instrument_id(symbol):
+    row = find_iifl_instrument(symbol)
+    if row is None:
+        return None, None
+    details = row.replace({np.nan: None}).to_dict()
+    return find_instrument_id(details), details
+
+
+# ============================================================
+# HISTORICAL DATA
+# ============================================================
+
+def _parse_iifl_candles(raw_result):
+    """Normalize IIFL historical-data result into a list of candles."""
+    result = raw_result
+
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return None
+
+    # Some responses wrap the candle array in another object/list.
+    if isinstance(result, dict):
+        for key in ["candles", "data", "result", "records"]:
+            if key in result:
+                result = result[key]
+                break
+
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            return None
+
+    if isinstance(result, list) and result:
+        if isinstance(result[0], dict) and "candles" in result[0]:
+            result = result[0]["candles"]
+        return result if isinstance(result, list) else None
 
     return None
 
 
-def normalize_history_result(result):
-    if result is None:
-        return None
+def _call_historicaldata(instrument_id, exchange, from_date, to_date, interval):
+    headers = get_iifl_headers()
+    if headers is None:
+        return None, "IIFL session is not available."
 
-    if isinstance(result, pd.DataFrame):
-        x = result.copy()
-    elif isinstance(result, list):
-        x = pd.DataFrame(result)
-    elif isinstance(result, dict):
-        # Common API shapes.
-        if isinstance(result.get("result"), list):
-            x = pd.DataFrame(result["result"])
-        elif isinstance(result.get("data"), list):
-            x = pd.DataFrame(result["data"])
-        elif isinstance(result.get("result"), dict):
-            payload = result["result"]
-            if isinstance(payload.get("data"), list):
-                x = pd.DataFrame(payload["data"])
-            else:
-                x = pd.DataFrame(payload)
-        else:
-            return None
-    else:
-        return None
+    if instrument_id is None or str(instrument_id).strip() == "":
+        return None, "Missing instrument ID."
 
-    if x.empty:
-        return None
-
-    # Normalize common IIFL / broker field names.
-    mapping = {}
-    for c in x.columns:
-        k = str(c).lower().replace("_", "").replace(" ", "")
-        if k in ("date", "datetime", "timestamp", "time"):
-            mapping[c] = "Date"
-        elif k in ("open", "openprice"):
-            mapping[c] = "Open"
-        elif k in ("high", "highprice"):
-            mapping[c] = "High"
-        elif k in ("low", "lowprice"):
-            mapping[c] = "Low"
-        elif k in ("close", "closeprice", "ltp"):
-            mapping[c] = "Close"
-        elif k in ("volume", "vol", "qty", "totaltradedquantity"):
-            mapping[c] = "Volume"
-
-    x = x.rename(columns=mapping)
-
-    required = ["Date", "Open", "High", "Low", "Close", "Volume"]
-    if not all(c in x.columns for c in required):
-        return None
-
-    x["Date"] = pd.to_datetime(x["Date"], errors="coerce")
-    for c in required[1:]:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-
-    x = x.dropna(subset=required).sort_values("Date").drop_duplicates("Date")
-    return x.reset_index(drop=True)
-
-
-def call_existing_history(md, symbol, instrument_id, days):
-    fn = discover_history_function(md)
-    if fn is None:
-        return None, "No compatible historical-data function found in market_data.py."
-
-    attempts = [
-        {"symbol": symbol, "days": days},
-        {"symbol": symbol, "instrument_id": instrument_id, "days": days},
-        {"symbol": symbol, "instrumentId": instrument_id, "days": days},
-        {"instrument_id": instrument_id, "days": days},
-        {"instrumentId": instrument_id, "days": days},
-        {"symbol": symbol},
-    ]
-
-    errors = []
-
-    for kwargs in attempts:
-        try:
-            result = fn(**kwargs)
-            data = normalize_history_result(result)
-            if data is not None and len(data) >= 20:
-                return data, None
-        except TypeError as e:
-            errors.append(str(e))
-            continue
-        except Exception as e:
-            errors.append(str(e))
-            continue
-
-    # Positional fallback.
-    for args in [
-        (symbol, instrument_id, days),
-        (instrument_id, days),
-        (symbol, days),
-    ]:
-        try:
-            result = fn(*args)
-            data = normalize_history_result(result)
-            if data is not None and len(data) >= 20:
-                return data, None
-        except Exception as e:
-            errors.append(str(e))
-
-    return None, " | ".join(errors[-3:])
-
-
-# ============================================================
-# Manual CSV fallback
-# ============================================================
-
-def parse_price_csv(uploaded):
-    if uploaded is None:
-        return None
+    url = f"{IIFL_BASE_URL}/marketdata/historicaldata"
+    payload = {
+        "exchange": exchange,
+        "instrumentId": str(instrument_id),
+        "interval": interval,
+        "fromDate": from_date,
+        "toDate": to_date
+    }
 
     try:
-        uploaded.seek(0)
-        x = pd.read_csv(uploaded)
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+    except Exception as e:
+        return None, f"Network error: {e}"
+
+    if response.status_code == 401:
+        return None, "HTTP 401 — session expired, please log in again."
+    if response.status_code == 403:
+        return None, "HTTP 403 — access denied (check Market Data entitlement)."
+    if response.status_code != 200:
+        return None, f"HTTP {response.status_code}: {response.text[:300]}"
+
+    try:
+        data = response.json()
     except Exception:
-        uploaded.seek(0)
-        x = pd.read_excel(uploaded)
+        try:
+            data = json.loads(response.text)
+        except Exception:
+            return None, f"Invalid JSON response: {response.text[:300]}"
 
-    x.columns = [str(c).strip() for c in x.columns]
-    cols = {c.lower(): c for c in x.columns}
+    # IIFL documentation notes that historical chart data may be returned
+    # as a string, so handle both JSON objects and JSON-encoded strings.
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return None, f"Unexpected string response: {data[:300]}"
 
-    def find(names):
-        for n in names:
-            if n.lower() in cols:
-                return cols[n.lower()]
+    if not isinstance(data, dict):
+        return None, "Unexpected IIFL response format."
+
+    status = data.get("status")
+    if status not in ("Ok", "ok", True):
+        message = str(data.get("message") or data.get("error") or "Unknown IIFL error")
+        return None, f"IIFL rejected: {message}"
+
+    candles = _parse_iifl_candles(data.get("result", data.get("data")))
+    if not candles:
+        return None, f"Zero candles returned for exchange='{exchange}'."
+
+    return candles, None
+
+
+def _candles_to_dataframe(candles):
+    rows = []
+    for candle in candles or []:
+        if isinstance(candle, (list, tuple)) and len(candle) >= 6:
+            try:
+                rows.append({
+                    "Date": candle[0],
+                    "Open": float(candle[1]),
+                    "High": float(candle[2]),
+                    "Low": float(candle[3]),
+                    "Close": float(candle[4]),
+                    "Volume": float(candle[5])
+                })
+            except Exception:
+                continue
+        elif isinstance(candle, dict):
+            def gv(keys):
+                for k in keys:
+                    if k in candle and candle[k] is not None:
+                        return candle[k]
+                return None
+            try:
+                rows.append({
+                    "Date": gv(["timestamp", "initialTimestamp", "time", "date", "Date"]),
+                    "Open": float(gv(["open", "Open"])),
+                    "High": float(gv(["high", "High"])),
+                    "Low": float(gv(["low", "Low"])),
+                    "Close": float(gv(["close", "Close"])),
+                    "Volume": float(gv(["volume", "Volume"]))
+                })
+            except Exception:
+                continue
+
+    if not rows:
         return None
 
-    datec = find(["Date", "Datetime", "Timestamp"])
-    openc = find(["Open"])
-    highc = find(["High"])
-    lowc = find(["Low"])
-    closec = find(["Close", "LTP"])
-    volc = find(["Volume", "Vol"])
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
-    if not all([datec, openc, highc, lowc, closec, volc]):
-        raise ValueError("Price CSV must contain Date, Open, High, Low, Close and Volume.")
 
-    x = x.rename(
-        columns={
-            datec: "Date",
-            openc: "Open",
-            highc: "High",
-            lowc: "Low",
-            closec: "Close",
-            volc: "Volume",
-        }
-    )
-    x["Date"] = pd.to_datetime(x["Date"], errors="coerce")
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
+@st.cache_data(ttl=300, show_spinner=False)
+def get_iifl_historical_data(instrument_id, from_date, to_date, interval="1 day"):
+    """Fetch historical data in small chunks to avoid IIFL max-date-range errors."""
+    try:
+        start = datetime.strptime(from_date, "%d-%b-%Y")
+        end = datetime.strptime(to_date, "%d-%b-%Y")
+    except Exception as e:
+        return None, [("dates", f"Invalid date format: {e}")]
 
-    return x.dropna(subset=["Date", "Open", "High", "Low", "Close", "Volume"]).sort_values("Date")
+    if start >= end:
+        return None, [("dates", "From date must be earlier than to date.")]
+
+    # IIFL can reject a long single historical request (EC809).
+    # 60 calendar-day chunks are deliberately conservative.
+    chunk_days = 60
+    all_candles = []
+    errors = []
+    current_start = start
+
+    while current_start < end:
+        current_end = min(current_start + timedelta(days=chunk_days - 1), end)
+        chunk_ok = False
+
+        # NSE cash-equity data belongs to NSEEQ. Keep fallbacks only as a
+        # compatibility path for accounts where the segment is exposed differently.
+        for exchange in EXCHANGE_FALLBACKS:
+            candles, error = _call_historicaldata(
+                instrument_id,
+                exchange,
+                current_start.strftime("%d-%b-%Y"),
+                current_end.strftime("%d-%b-%Y"),
+                interval
+            )
+            if candles is not None:
+                all_candles.extend(candles)
+                chunk_ok = True
+                break
+            errors.append((f"{exchange} {current_start:%d-%b-%Y}→{current_end:%d-%b-%Y}", error))
+
+        if not chunk_ok:
+            # Continue with later chunks so one bad/holiday range does not
+            # destroy the entire stock's history.
+            pass
+
+        current_start = current_end + timedelta(days=1)
+
+    df = _candles_to_dataframe(all_candles)
+    if df is None or df.empty:
+        return None, errors or [("historical", "No candles returned by IIFL.")]
+
+    return df, errors
+
+
+def get_stock_daily_data(symbol, days=300):
+    try:
+        instrument_id, details = get_instrument_id(symbol)
+        if instrument_id is None:
+            return None, None, [("lookup", f"No instrument found for {symbol}.")]
+
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        df, errors = get_iifl_historical_data(
+            instrument_id,
+            start_date.strftime("%d-%b-%Y"),
+            end_date.strftime("%d-%b-%Y"),
+            "1 day"
+        )
+        return df, instrument_id, errors
+    except Exception as e:
+        return None, None, [("exception", f"{type(e).__name__}: {e}")]
+
+
+def get_iifl_live_quote(instrument_id, exchange="NSEEQ"):
+    headers = get_iifl_headers()
+    if headers is None:
+        return None, "No session."
+    url = f"{IIFL_BASE_URL}/marketdata/marketquotes"
+    payload = [{"exchange": exchange, "instrumentId": str(instrument_id)}]
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+    except Exception as e:
+        return None, str(e)
+    if response.status_code != 200:
+        return None, f"HTTP {response.status_code}"
+    try:
+        data = response.json()
+    except Exception:
+        return None, "Invalid JSON"
+    if data.get("status") not in ("Ok", "ok", True):
+        return None, data.get("message")
+    result = data.get("result")
+    if isinstance(result, list) and result:
+        return result[0], None
+    return None, "No data"
 
 
 # ============================================================
-# Charts
+# TECHNICAL INDICATORS
 # ============================================================
 
-def make_chart(df, pivot=np.nan, title="VCP Chart"):
-    x = add_indicators(df)
+def calc_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+
+def calc_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def calc_atr(df, period=14):
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low, (high - prev_close).abs(), (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+def add_indicators(df):
+    df = df.copy()
+    df["EMA21"] = calc_ema(df["Close"], 21)
+    df["EMA50"] = calc_ema(df["Close"], 50)
+    df["EMA150"] = calc_ema(df["Close"], 150)
+    df["EMA200"] = calc_ema(df["Close"], 200)
+    df["RSI"] = calc_rsi(df["Close"], 14)
+    macd, signal, hist = calc_macd(df["Close"])
+    df["MACD"] = macd
+    df["MACD_Signal"] = signal
+    df["MACD_Hist"] = hist
+    df["ATR"] = calc_atr(df, 14)
+    return df
+
+
+# ============================================================
+# SUPPORT / RESISTANCE
+# ============================================================
+
+def find_support_resistance(df, window=5, tolerance_pct=1.5, max_levels=5):
+    if df is None or len(df) < window * 2 + 1:
+        return [], []
+    highs, lows = df["High"].values, df["Low"].values
+    n = len(df)
+    swing_highs, swing_lows = [], []
+    for i in range(window, n - window):
+        wh = highs[i - window: i + window + 1]
+        wl = lows[i - window: i + window + 1]
+        if highs[i] == wh.max():
+            swing_highs.append(float(highs[i]))
+        if lows[i] == wl.min():
+            swing_lows.append(float(lows[i]))
+
+    def cluster(levels):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        clusters = [[levels[0]]]
+        for lvl in levels[1:]:
+            avg = np.mean(clusters[-1])
+            if abs(lvl - avg) / avg * 100 <= tolerance_pct:
+                clusters[-1].append(lvl)
+            else:
+                clusters.append([lvl])
+        return [(float(np.mean(c)), len(c)) for c in clusters]
+
+    resistance = sorted(cluster(swing_highs), key=lambda x: -x[1])[:max_levels]
+    support = sorted(cluster(swing_lows), key=lambda x: -x[1])[:max_levels]
+    return support, resistance
+
+
+def detect_breakout(df, resistance_levels):
+    if df is None or len(df) < 31 or not resistance_levels:
+        return False, None
+    close, prev_close = df["Close"].iloc[-1], df["Close"].iloc[-2]
+    volume = df["Volume"].iloc[-1]
+    avg_volume = df["Volume"].tail(30).mean()
+    for price, touches in resistance_levels:
+        if prev_close <= price < close:
+            return True, {
+                "level": price, "touches": touches,
+                "volume_confirmed": bool(volume > avg_volume * 1.3),
+                "volume_ratio": round(volume / avg_volume, 2) if avg_volume else 0
+            }
+    return False, None
+
+
+# ============================================================
+# VCP ANALYSIS
+# ============================================================
+
+def analyze_vcp_old(df):
+    if df is None or len(df) < 150:
+        return None
+
+    close, volume = df["Close"], df["Volume"]
+    ma50, ma150, ma200 = close.rolling(50).mean(), close.rolling(150).mean(), close.rolling(200).mean()
+    current_price = float(close.iloc[-1])
+
+    trend_score = 0
+    if current_price > float(ma50.iloc[-1]): trend_score += 1
+    if current_price > float(ma150.iloc[-1]): trend_score += 1
+    if len(ma200.dropna()) > 0 and current_price > float(ma200.iloc[-1]): trend_score += 1
+    if ma50.iloc[-1] > ma150.iloc[-1]: trend_score += 1
+    if len(ma200.dropna()) > 0 and ma150.iloc[-1] > ma200.iloc[-1]: trend_score += 1
+
+    lookback = min(120, len(close) - 1)
+    prior_gain = ((current_price / float(close.iloc[-lookback])) - 1) * 100
+
+    recent = df.tail(40)
+    recent_high, recent_low = float(recent["High"].max()), float(recent["Low"].min())
+    consolidation_range = ((recent_high - recent_low) / recent_high) * 100
+
+    returns = close.pct_change()
+    volatility_contracting = returns.tail(20).std() < returns.tail(60).std()
+
+    volume_10, volume_30 = float(volume.tail(10).mean()), float(volume.tail(30).mean())
+    volume_ratio = volume_10 / volume_30 if volume_30 > 0 else 1
+    volume_dryup = volume_ratio < 0.85
+
+    last_10 = df.tail(10)
+    range_10 = ((float(last_10["High"].max()) - float(last_10["Low"].min())) / float(last_10["High"].max())) * 100
+    tight_action = range_10 < 10
+
+    pivot = recent_high
+    distance_from_pivot = ((pivot - current_price) / pivot) * 100
+    near_pivot = -2 <= distance_from_pivot <= 8
+
+    current_volume = float(volume.iloc[-1])
+    breakout_volume_ratio = current_volume / volume_30 if volume_30 > 0 else 0
+    breakout_volume = breakout_volume_ratio >= 1.5
+
+    score = 0
+    score += 25 if trend_score >= 4 else 15 if trend_score >= 3 else 0
+    score += 15 if prior_gain >= 20 else 8 if prior_gain >= 10 else 0
+    score += 10 if consolidation_range <= 20 else 0
+    score += 10 if consolidation_range <= 12 else 0
+    score += 10 if volatility_contracting else 0
+    score += 10 if volume_dryup else 0
+    score += 5 if tight_action else 0
+    score += 10 if near_pivot else 0
+    score += 5 if breakout_volume else 0
+
+    if score >= 75: signal = "STRONG VCP"
+    elif score >= 60: signal = "VCP WATCH"
+    elif score >= 45: signal = "DEVELOPING"
+    else: signal = "NO SETUP"
+
+    return {
+        "Price": round(current_price, 2), "Score": score, "Signal": signal,
+        "Trend Score": trend_score, "Prior Gain %": round(prior_gain, 2),
+        "Consolidation %": round(consolidation_range, 2), "10D Range %": round(range_10, 2),
+        "Volume Ratio": round(volume_ratio, 2), "Pivot": round(pivot, 2),
+        "Distance Pivot %": round(distance_from_pivot, 2),
+        "Breakout Vol Ratio": round(breakout_volume_ratio, 2)
+    }
+
+
+def analyze_vcp_safe(df):
+    """Run the external VCP engine, with a safe fallback.
+
+    The current vcp.py can raise errors such as:
+    TypeError: cannot unpack non-iterable bool object
+    A single broken VCP-engine implementation should never cause the
+    entire market scan to fail, so the scanner falls back to the built-in
+    analyzer when the external engine fails or returns an invalid type.
+    """
+    try:
+        result = analyze_vcp_engine(df)
+
+        # Accept the normal dictionary result.
+        if isinstance(result, dict):
+            return result
+
+        # Be tolerant if a future engine version returns (analysis, meta).
+        if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], dict):
+            return result[0]
+
+    except Exception:
+        pass
+
+    # Stable built-in fallback used by the scanner.
+    return analyze_vcp_old(df)
+
+
+def signal_badge(signal):
+    m = {"STRONG VCP": "badge-strong", "VCP WATCH": "badge-watch",
+         "DEVELOPING": "badge-dev", "NO SETUP": "badge-none"}
+    return f'<span class="signal-badge {m.get(signal, "badge-none")}">{signal}</span>'
+
+
+# ============================================================
+# SCANNER
+# ============================================================
+
+def scan_stocks(symbols):
+    results = []
+    scan_errors = []
+    progress = st.progress(0)
+    status = st.empty()
+    total = len(symbols)
+
+    if total == 0:
+        st.session_state["scan_errors"] = [("universe", "No stocks selected for scanning.")]
+        return pd.DataFrame()
+
+    for i, symbol in enumerate(symbols):
+        name = symbol.replace(".NS", "")
+        status.write(f"Scanning {name} ({i + 1}/{total})")
+        try:
+            df, instrument_id, errors = get_stock_daily_data(symbol)
+
+            if df is None or len(df) < 100:
+                reason = errors[-1][1] if errors else "Insufficient historical data."
+                scan_errors.append((name, reason))
+                progress.progress((i + 1) / total)
+                continue
+
+            analysis = analyze_vcp_safe(df)
+            if not analysis:
+                scan_errors.append((name, "VCP engine returned no analysis."))
+                progress.progress((i + 1) / total)
+                continue
+
+            analysis["Price"] = round(float(df["Close"].iloc[-1]), 2)
+            support, resistance = find_support_resistance(df)
+            is_breakout, breakout_info = detect_breakout(df, resistance)
+            rsi = calc_rsi(df["Close"]).iloc[-1]
+            atr = calc_atr(df).iloc[-1]
+
+            analysis["Stock"] = name
+            analysis["Symbol"] = symbol
+            analysis["Instrument ID"] = str(instrument_id)
+            analysis["RSI"] = round(float(rsi), 1)
+            analysis["ATR"] = round(float(atr), 2)
+            analysis["Breakout"] = "🚨 YES" if is_breakout else ""
+            results.append(analysis)
+
+        except Exception as e:
+            # Never silently discard scanner failures.
+            scan_errors.append((name, f"{type(e).__name__}: {e}"))
+
+        progress.progress((i + 1) / total)
+
+    progress.empty()
+    status.empty()
+    st.session_state["scan_errors"] = scan_errors
+
+    if not results:
+        return pd.DataFrame()
+
+    return pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True)
+
+
+# ============================================================
+# TRADINGVIEW-STYLE CHART
+# ============================================================
+
+def render_tv_chart(symbol, df, support, resistance, live_price=None, breakout_info=None):
     fig = make_subplots(
-        rows=3,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.58, 0.20, 0.22],
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.52, 0.14, 0.16, 0.18], vertical_spacing=0.02,
+        specs=[[{}], [{}], [{}], [{}]]
     )
 
-    fig.add_trace(
-        go.Candlestick(
-            x=x["Date"],
-            open=x["Open"],
-            high=x["High"],
-            low=x["Low"],
-            close=x["Close"],
-            name="Price",
-        ),
-        row=1,
-        col=1,
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        name=symbol, increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a", decreasing_fillcolor="#ef5350"
+    ), row=1, col=1)
+
+    ema_colors = {"EMA21": "#f5c542", "EMA50": "#42a5f5", "EMA150": "#ab47bc", "EMA200": "#ff7043"}
+    for ema, color in ema_colors.items():
+        if ema in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df[ema], name=ema, line=dict(color=color, width=1.2)
+            ), row=1, col=1)
+
+    last_close = float(df["Close"].iloc[-1])
+    prev_close = float(df["Close"].iloc[-2]) if len(df) > 1 else last_close
+    is_up = last_close >= prev_close
+    close_color = "#26a69a" if is_up else "#ef5350"
+
+    for price, touches in resistance:
+        fig.add_hline(y=price, line=dict(color="#ef5350", width=1, dash="dot"),
+                       annotation_text=f"R {price:.1f}", annotation_font_size=10, row=1, col=1)
+    for price, touches in support:
+        fig.add_hline(y=price, line=dict(color="#26a69a", width=1, dash="dot"),
+                       annotation_text=f"S {price:.1f}", annotation_font_size=10, row=1, col=1)
+
+    fig.add_annotation(
+        xref="paper", x=1.0, yref="y", y=last_close,
+        xanchor="left", yanchor="middle",
+        text=f"  {last_close:.2f}  ",
+        showarrow=False, bgcolor=close_color, font=dict(color="#0e1117", size=11, family="monospace"),
+        borderpad=2, row=1, col=1
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=x["Date"],
-            y=x["DMA20"],
-            name="20 DMA",
-            line=dict(width=1),
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x["Date"],
-            y=x["DMA50"],
-            name="50 DMA",
-            line=dict(width=1.5),
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x["Date"],
-            y=x["DMA200"],
-            name="200 DMA",
-            line=dict(width=1.5),
-        ),
-        row=1,
-        col=1,
-    )
-
-    if np.isfinite(pivot):
-        fig.add_hline(
-            y=pivot,
-            line_dash="dash",
-            annotation_text=f"Pivot ₹{pivot:,.2f}",
-            row=1,
-            col=1,
+    if live_price:
+        live_color = "#26a69a" if live_price >= last_close else "#ef5350"
+        fig.add_hline(y=live_price, line=dict(color="#2962ff", width=1.3, dash="solid"), row=1, col=1)
+        fig.add_annotation(
+            xref="paper", x=1.0, yref="y", y=live_price,
+            xanchor="left", yanchor="middle",
+            text=f"  LTP {live_price:.2f}  ",
+            showarrow=False, bgcolor="#2962ff", font=dict(color="#ffffff", size=11, family="monospace"),
+            borderpad=2, row=1, col=1
         )
 
-    fig.add_trace(
-        go.Bar(
-            x=x["Date"],
-            y=x["Volume"],
-            name="Volume",
-        ),
-        row=2,
-        col=1,
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.5, y=0.72,
+        text=symbol.replace(".NS", ""),
+        showarrow=False, font=dict(color="rgba(255,255,255,0.05)", size=72),
+        row=1, col=1
     )
 
-    fig.add_trace(
-        go.Scatter(
-            x=x["Date"],
-            y=x["RSI14"],
-            name="RSI",
-        ),
-        row=3,
-        col=1,
-    )
-    fig.add_hline(y=70, line_dash="dot", row=3, col=1)
-    fig.add_hline(y=40, line_dash="dot", row=3, col=1)
+    if breakout_info:
+        fig.add_annotation(
+            x=df.index[-1], y=df["High"].iloc[-1] * 1.02,
+            text="🚨 BREAKOUT", showarrow=True, arrowhead=2,
+            font=dict(color="#ff5c7a", size=12), row=1, col=1
+        )
+
+    volume_colors = np.where(df["Close"] >= df["Open"], "#26a69a", "#ef5350")
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
+                          marker_color=volume_colors, showlegend=False), row=2, col=1)
+
+    if "RSI" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI",
+                                  line=dict(color="#f5c542", width=1.3)), row=3, col=1)
+        fig.add_hline(y=70, line=dict(color="#ef5350", width=0.8, dash="dash"), row=3, col=1)
+        fig.add_hline(y=30, line=dict(color="#26a69a", width=0.8, dash="dash"), row=3, col=1)
+
+    if "MACD" in df.columns:
+        macd_colors = np.where(df["MACD_Hist"] >= 0, "#26a69a", "#ef5350")
+        fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="MACD Hist",
+                              marker_color=macd_colors, showlegend=False), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD",
+                                  line=dict(color="#42a5f5", width=1.2)), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal",
+                                  line=dict(color="#ff7043", width=1.2)), row=4, col=1)
 
     fig.update_layout(
-        title=title,
-        template="plotly_dark",
-        height=760,
+        height=820, template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#131722",
+        font=dict(color="#d1d4dc", size=11),
+        margin=dict(l=10, r=90, t=30, b=10),
         xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=50, b=20),
-        legend=dict(orientation="h"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+        hovermode="x unified",
+        dragmode="pan",
+        uirevision=symbol,
+        hoverlabel=dict(bgcolor="#1c2129", font_size=11, bordercolor="#2a2e39")
+    )
+
+    fig.update_xaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
+    )
+    fig.update_yaxes(
+        showspikes=True, spikemode="across", spikesnap="cursor",
+        spikecolor="#758696", spikethickness=1, spikedash="solid",
+        showgrid=True, gridcolor="#1e222d", zeroline=False
+    )
+
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="MACD", row=4, col=1)
+
+    fig.update_xaxes(
+        rangeslider_visible=False,
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(step="all", label="All")
+            ],
+            bgcolor="#1c2129", activecolor="#2962ff",
+            font=dict(color="#d1d4dc", size=10),
+            x=0, y=1.08
+        ),
+        row=1, col=1
+    )
+
+    fig.update_xaxes(
+        tickformat="%b '%y", tickfont=dict(size=10, color="#787b86"),
+        row=4, col=1
     )
 
     return fig
 
 
-# ============================================================
-# Sidebar
-# ============================================================
+def render_symbol_page(symbol):
+    st.subheader(f"📈 {symbol.replace('.NS', '')}")
 
-st.sidebar.title("⚙️ Scanner Controls")
-
-history_days = st.sidebar.slider(
-    "Historical candles",
-    min_value=200,
-    max_value=700,
-    value=400,
-    step=50,
-)
-
-min_score = st.sidebar.slider(
-    "Minimum score to highlight",
-    min_value=0,
-    max_value=95,
-    value=70,
-    step=5,
-)
-
-require_trend = st.sidebar.checkbox(
-    "Require Trend Template",
-    value=True,
-)
-
-require_vcp = st.sidebar.checkbox(
-    "Require 3+ VCP contractions",
-    value=True,
-)
-
-show_chart = st.sidebar.checkbox(
-    "Show chart for selected stock",
-    value=True,
-)
-
-max_symbols = st.sidebar.selectbox(
-    "Maximum stocks to scan",
-    options=[50, 100, 250, 500, 1000, 2000],
-    index=2,
-    help="Each stock normally needs an IIFL historical-data request. Start with 50–250 while testing.",
-)
-
-st.sidebar.divider()
-st.sidebar.markdown("### 1️⃣ Stock universe")
-
-universe_mode = st.sidebar.radio(
-    "Choose scan universe",
-    ["Automatic NSE EQ", "Manual watchlist", "Screener CSV"],
-    index=0,
-)
-
-refresh_nse = st.sidebar.button(
-    "🔄 Refresh NSE universe",
-    use_container_width=True,
-    help="Refreshes the NSE equity master. It is otherwise cached for 24 hours.",
-)
-
-if refresh_nse:
-    load_nse_equity_universe.clear()
-
-st.sidebar.markdown("### 2️⃣ Optional fundamentals")
-st.sidebar.caption(
-    "Screener.in is optional. Without it, the app runs technical/VCP mode using NSE + IIFL."
-)
-
-fund_file = st.sidebar.file_uploader(
-    "Optional Screener.in CSV / XLSX",
-    type=["csv", "xlsx"],
-    key="fundamental_csv",
-)
-
-price_file = st.sidebar.file_uploader(
-    "Optional price CSV for testing",
-    type=["csv", "xlsx"],
-    key="price_csv",
-)
-
-st.sidebar.divider()
-st.sidebar.markdown("### Screener query (optional)")
-st.sidebar.code(SCREENER_QUERY, language="text")
-
-# ============================================================
-# Header
-# ============================================================
-
-st.title("📈 IIFL VCP Champion Scanner")
-st.caption(
-    "NSE universe + IIFL price data, with optional fundamentals, Trend Template, VCP, Pivot and Breakout scoring"
-)
-
-# ============================================================
-# Fundamental data
-# ============================================================
-
-fund_df = None
-fund_resolved = {}
-
-if fund_file is not None:
     try:
-        fund_file.seek(0)
-        if fund_file.name.lower().endswith(".csv"):
-            fund_df = pd.read_csv(fund_file)
-        else:
-            fund_df = pd.read_excel(fund_file)
-
-        fund_df, fund_resolved = prepare_fundamental_df(fund_df)
-
-        symbol_col = fund_resolved.get("symbol")
-        if symbol_col:
-            fund_df["_symbol_norm"] = fund_df[symbol_col].apply(normalize_symbol)
-
-        st.success(
-            f"Loaded {len(fund_df):,} fundamental rows from {fund_file.name}."
-        )
+        _render_symbol_page_inner(symbol)
     except Exception as e:
-        st.error(f"Could not read fundamental file: {e}")
+        st.error(f"⚠️ Error while rendering this chart: **{type(e).__name__}**: {e}")
+        with st.expander("Full traceback (for debugging)"):
+            tb = traceback.format_exc()
+            session_token = st.session_state.get("iifl_user_session", "")
+            if session_token:
+                tb = tb.replace(session_token, "***REDACTED-TOKEN***")
+            st.code(tb)
 
-# ============================================================
-# NSE universe
-# ============================================================
 
-nse_df, nse_error = load_nse_equity_universe()
+def _render_symbol_page_inner(symbol):
+    with st.spinner("Loading instrument..."):
+        instrument_id, details = get_instrument_id(symbol)
 
-if not nse_df.empty:
-    st.success(f"NSE universe ready: {len(nse_df):,} EQ symbols available.")
-else:
-    st.warning(
-        "Could not load the live NSE equity master right now. "
-        "Use Manual watchlist or upload a Screener CSV. "
-        f"NSE message: {nse_error}"
+    if instrument_id is None:
+        st.error(f"❌ Could not find instrument for {symbol}.")
+        return
+
+    with st.spinner("Loading historical data..."):
+        df, _instrument_id2, errors = get_stock_daily_data(symbol)
+
+    if df is None:
+        session_expired = errors and any("401" in str(err) for _, err in errors)
+        if session_expired:
+            st.warning("🔒 Your IIFL session has expired. Please log in again.")
+            if "iifl_user_session" in st.session_state:
+                del st.session_state["iifl_user_session"]
+            st.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
+        else:
+            st.error("❌ Could not load historical data.")
+            with st.expander("Error details"):
+                for exch, err in errors:
+                    st.write(f"`{exch}` → {err}")
+        return
+
+    df_ind = add_indicators(df)
+    support, resistance = find_support_resistance(df)
+    is_breakout, breakout_info = detect_breakout(df, resistance)
+
+    # FIX: use the imported VCP engine consistently.
+    vcp = analyze_vcp_safe(df)
+
+    col_refresh, col_metrics = st.columns([1, 5])
+    with col_refresh:
+        refresh = st.button("🔄 Refresh Live", key=f"refresh_{symbol}")
+
+    live_price = None
+    state_key = f"quote_{symbol}"
+    if refresh or state_key not in st.session_state:
+        quote, qerr = get_iifl_live_quote(instrument_id, "NSEEQ")
+        if quote:
+            st.session_state[state_key] = quote
+
+    quote = st.session_state.get(state_key)
+    if quote:
+        live_price = quote.get("ltp")
+
+    with col_metrics:
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Price", live_price or df["Close"].iloc[-1])
+        m2.metric("RSI (14)", round(float(df_ind["RSI"].iloc[-1]), 1))
+        m3.metric("ATR (14)", round(float(df_ind["ATR"].iloc[-1]), 2))
+        m4.metric("VCP Score", vcp.get("Score", "—") if vcp else "—")
+        m5.metric("Signal", vcp.get("Signal", "—") if vcp else "—")
+        m6.metric("Breakout", "🚨 YES" if is_breakout else "No")
+
+    if is_breakout and breakout_info:
+        vol_note = "with volume confirmation ✅" if breakout_info["volume_confirmed"] else "on light volume ⚠️"
+        st.markdown(
+            f'<span class="signal-badge badge-breakout">🚨 BREAKOUT</span> '
+            f'above resistance **₹{breakout_info["level"]:.1f}** ({breakout_info["touches"]} prior touches), '
+            f'{vol_note} — volume {breakout_info["volume_ratio"]}x average',
+            unsafe_allow_html=True
+        )
+
+    fig = render_tv_chart(symbol, df_ind, support, resistance, live_price, breakout_info)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displaylogo": False,
+            "displayModeBar": True,
+            "modeBarButtonsToRemove": [
+                "select2d", "lasso2d", "autoScale2d", "toggleSpikelines"
+            ],
+            "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+            "doubleClick": "reset"
+        }
     )
 
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.write("**Resistance levels**")
+        if resistance:
+            st.dataframe(pd.DataFrame(resistance, columns=["Price", "Touches"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("None detected.")
+    with c2:
+        st.write("**Support levels**")
+        if support:
+            st.dataframe(pd.DataFrame(support, columns=["Price", "Touches"]),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("None detected.")
+    with c3:
+        st.write("**VCP details**")
+        if vcp:
+            st.dataframe(pd.DataFrame([vcp]).T.rename(columns={0: "Value"}),
+                         use_container_width=True)
+        else:
+            st.caption("Not enough history (needs 150+ candles).")
+
+
 # ============================================================
-# Data source
+# SIDEBAR
 # ============================================================
 
-md = try_import_market_data()
+if "page" not in st.session_state:
+    st.session_state["page"] = "🏠 Overview"
+if "chart_symbol" not in st.session_state:
+    st.session_state["chart_symbol"] = "RELIANCE.NS"
 
-if md is None:
-    st.error(
-        "market_data.py was not found. Put your existing IIFL market_data.py in the same GitHub repository as main.py. "
-        "The NSE universe can load without it, but historical IIFL candles require the IIFL data adapter."
-    )
+st.sidebar.title("📈 IIFL VCP Terminal")
+st.sidebar.markdown("---")
+st.sidebar.header("🔐 Connection")
+
+if "iifl_user_session" in st.session_state:
+    st.sidebar.success("🟢 Connected")
 else:
-    history_fn = discover_history_function(md)
-    if history_fn is None:
-        st.error("market_data.py was found, but no supported historical-data function was detected.")
+    st.sidebar.error("🔴 Not connected")
+    st.sidebar.link_button("🔑 Login with IIFL", IIFL_LOGIN_URL)
+
+st.sidebar.markdown("---")
+page = st.sidebar.radio(
+    "Navigate",
+    ["🏠 Overview", "🔍 VCP Scanner", "📈 Chart Explorer"],
+    index=["🏠 Overview", "🔍 VCP Scanner", "📈 Chart Explorer"].index(st.session_state["page"])
+)
+st.session_state["page"] = page
+
+st.sidebar.markdown("---")
+st.sidebar.header("📋 Watchlist")
+watchlist_source = st.sidebar.radio(
+    "Stock universe",
+    ["Built-in F&O list (~150 stocks)", "Nifty 500 (auto-fetch)", "Upload CSV", "Custom (paste symbols)"],
+    index=0
+)
+
+NIFTY500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+if watchlist_source == "Nifty 500 (auto-fetch)":
+    fetched = fetch_nse_index_list(NIFTY500_URL)
+    if fetched:
+        active_stocks = fetched
+        st.sidebar.success(f"✅ Fetched {len(active_stocks)} Nifty 500 stocks from NSE.")
     else:
-        st.success(f"IIFL data adapter ready: `{history_fn.__name__}()`")
-
-# ============================================================
-# Watchlist / universe selection
-# ============================================================
-
-manual_text = st.text_area(
-    "Manual NSE symbols (used only in Manual watchlist mode)",
-    value="RELIANCE, TCS, HDFCBANK, ICICIBANK, BHARTIARTL",
-    height=100,
-    placeholder="RELIANCE, TCS, HDFCBANK, ICICIBANK, BHARTIARTL",
-)
-
-if universe_mode == "Automatic NSE EQ":
-    symbols = build_symbol_universe(nse_df, mode="NSE EQ")
-    source_label = "NSE EQ universe"
-elif universe_mode == "Screener CSV":
-    symbols = build_symbol_universe(
-        nse_df,
-        fund_df=fund_df,
-        fund_resolved=fund_resolved,
-        mode="Screener CSV",
-    )
-    source_label = "Screener CSV"
-else:
-    symbols = [
-        normalize_symbol(s)
-        for s in re.split(r"[,\s]+", manual_text.strip())
-        if s.strip()
-    ]
-    symbols = list(dict.fromkeys(symbols))
-    source_label = "Manual watchlist"
-
-# Keep only symbols that are present in the NSE EQ master when it is available.
-# This removes stale/invalid symbols before making IIFL requests.
-if universe_mode == "Manual watchlist" and not nse_df.empty:
-    valid_nse = set(nse_df["SYMBOL"].tolist())
-    original_count = len(symbols)
-    symbols = [s for s in symbols if s in valid_nse]
-    removed = original_count - len(symbols)
-    if removed:
-        st.warning(f"Removed {removed} symbol(s) not found in the current NSE EQ master.")
-
-if symbols:
-    available = len(symbols)
-    st.info(
-        f"Selected source: **{source_label}** | Available: **{available:,}** | "
-        f"Will scan up to **{min(max_symbols, available):,}** stocks."
-    )
-else:
-    st.warning("No symbols selected. Refresh the NSE universe or choose Manual watchlist / Screener CSV.")
-
-# Technical-only mode is automatic when no fundamentals are supplied.
-technical_only = fund_df is None or not fund_resolved.get("symbol")
-if technical_only:
-    st.info(
-        "🟦 **Technical/VCP mode:** no Screener fundamentals uploaded. "
-        "The scanner will calculate Trend /20 + VCP /30 + Breakout /10 = **60-point technical score**. "
-        "Upload fundamentals later to enable the full 100-point Champion score."
-    )
-else:
-    st.info(
-        "🟩 **Full Champion mode:** Fundamental /40 + Trend /20 + VCP /30 + Breakout /10 = **100 points**."
-    )
-
-# ============================================================
-# Analyze single symbol
-# ============================================================
-
-def analyze_symbol(symbol):
-    symbol = normalize_symbol(symbol)
-
-    # Fundamental row.
-    fscore = 0
-    fdetails = {}
-    frow = None
-
-    if fund_df is not None and "_symbol_norm" in fund_df.columns:
-        matches = fund_df[fund_df["_symbol_norm"] == symbol]
-        if not matches.empty:
-            frow = matches.iloc[0]
-            fscore, fdetails = fundamental_score(frow, fund_resolved)
-
-    # Price data.
-    price_df = None
-    data_error = None
-
-    # Uploaded price CSV is a manual test source.
-    if price_file is not None:
-        try:
-            price_df = parse_price_csv(price_file)
-        except Exception as e:
-            data_error = str(e)
-
-    # Existing IIFL data layer.
-    if price_df is None and md is not None:
-        # Instrument ID is optional here because the user's existing
-        # market_data.py may resolve it internally.
-        price_df, err = call_existing_history(md, symbol, None, history_days)
-        if price_df is None:
-            data_error = err
-
-    if price_df is None or len(price_df) < MIN_HISTORY_ROWS:
-        return {
-            "Symbol": symbol,
-            "Total": fscore,
-            "Technical": 0,
-            "Fundamental": fscore,
-            "Trend": 0,
-            "VCP": 0,
-            "Breakout": 0,
-            "Status": "NO DATA",
-            "Setup": "NO DATA",
-            "Pivot": np.nan,
-            "Distance": np.nan,
-            "VCP Count": 0,
-            "Final Contraction": np.nan,
-            "Volume Dry-up": np.nan,
-            "Volume Ratio": np.nan,
-            "Error": data_error or "Insufficient price history.",
-            "_df": None,
-            "_fdetails": fdetails,
-        }
-
-    try:
-        price_df = price_df.sort_values("Date").drop_duplicates("Date").reset_index(drop=True)
-        trend = calculate_trend_score(price_df)
-        vcp = calculate_vcp(price_df)
-        pivot = vcp.get("pivot", np.nan) if vcp.get("valid") else np.nan
-        brk = calculate_breakout_score(price_df, pivot)
-
-        technical_score = int(
-            min(
-                60,
-                trend["trend_score"]
-                + vcp.get("vcp_score", 0)
-                + brk["score"],
-            )
+        st.sidebar.error(
+            "❌ NSE blocked this request (common from cloud servers). "
+            "Use 'Upload CSV' instead — download the list from NSE's website "
+            "on your own device, then upload it here."
         )
-
-        if technical_only:
-            total = technical_score
-            status = "TECHNICAL"
-            if trend["hard_gate"] and vcp.get("contraction_count", 0) >= 3:
-                if brk.get("breakout", False):
-                    status = "TECH BREAKOUT"
-                elif pd.notna(vcp.get("distance_to_pivot", np.nan)) and vcp.get("distance_to_pivot", np.nan) <= 7:
-                    status = "TECH READY"
-                else:
-                    status = "TECH WATCH"
-        else:
-            total = int(min(100, fscore + technical_score))
-            status = classify(
-                total,
-                trend["hard_gate"],
-                vcp.get("vcp_score", 0),
-                brk["score"],
-            )
-
-        if require_trend and not trend["hard_gate"]:
-            status = "TREND FAIL"
-
-        if require_vcp and vcp.get("contraction_count", 0) < 3:
-            status = "NO VCP"
-
-        return {
-            "Symbol": symbol,
-            "Total": total,
-            "Technical": int(min(60, trend["trend_score"] + vcp.get("vcp_score", 0) + brk["score"])),
-            "Fundamental": fscore,
-            "Trend": trend["trend_score"],
-            "VCP": vcp.get("vcp_score", 0),
-            "Breakout": brk["score"],
-            "Status": status,
-            "Setup": vcp.get("setup", "UNKNOWN"),
-            "Pivot": pivot,
-            "Distance": vcp.get("distance_to_pivot", np.nan),
-            "VCP Count": vcp.get("contraction_count", 0),
-            "Final Contraction": vcp.get("final_contraction", np.nan),
-            "Volume Dry-up": vcp.get("volume_dryup", np.nan),
-            "Volume Ratio": brk.get("volume_ratio", np.nan),
-            "Error": "",
-            "_df": price_df,
-            "_vcp": vcp,
-            "_trend": trend,
-            "_breakout": brk,
-            "_fdetails": fdetails,
-        }
-
-    except Exception as e:
-        return {
-            "Symbol": symbol,
-            "Total": fscore,
-            "Technical": 0,
-            "Fundamental": fscore,
-            "Trend": 0,
-            "VCP": 0,
-            "Breakout": 0,
-            "Status": "ERROR",
-            "Setup": "ERROR",
-            "Pivot": np.nan,
-            "Distance": np.nan,
-            "VCP Count": 0,
-            "Final Contraction": np.nan,
-            "Volume Dry-up": np.nan,
-            "Volume Ratio": np.nan,
-            "Error": str(e),
-            "_df": price_df,
-            "_fdetails": fdetails,
-        }
-
-
-# ============================================================
-# Run scanner
-# ============================================================
-
-if not symbols:
-    st.warning(
-        "No stocks are ready to scan. Choose Automatic NSE EQ, enter a Manual watchlist, "
-        "or upload a Screener CSV."
+        active_stocks = FO_STOCKS
+        st.sidebar.caption(f"Falling back to built-in list ({len(active_stocks)} stocks).")
+elif watchlist_source == "Upload CSV":
+    uploaded = st.sidebar.file_uploader(
+        "Upload a CSV with a 'Symbol' column, or a .txt with one symbol per line",
+        type=["csv", "txt"]
     )
+    if uploaded is not None:
+        active_stocks = parse_uploaded_symbol_csv(uploaded)
+        if active_stocks:
+            st.sidebar.success(f"✅ Loaded {len(active_stocks)} symbols from file.")
+        else:
+            st.sidebar.error("Could not parse any symbols from this file.")
+            active_stocks = FO_STOCKS
+    else:
+        st.sidebar.info("Waiting for file upload...")
+        active_stocks = FO_STOCKS
+elif watchlist_source == "Custom (paste symbols)":
+    custom_text = st.sidebar.text_area("One symbol per line", value="\n".join(FO_STOCKS[:20]), height=160)
+    active_stocks = [
+        s.strip().upper() if s.strip().upper().endswith(".NS") else s.strip().upper() + ".NS"
+        for s in custom_text.splitlines() if s.strip()
+    ]
+else:
+    active_stocks = FO_STOCKS
+st.sidebar.caption(f"{len(active_stocks)} stocks in universe.")
 
-run = st.button("🚀 RUN CHAMPION SCAN", type="primary", use_container_width=True)
+# ============================================================
+# PAGE: OVERVIEW
+# ============================================================
 
-if run:
-    if not symbols:
-        st.error("No symbols to scan.")
+if page == "🏠 Overview":
+    st.title("🏠 Dashboard Overview")
+
+    if "iifl_user_session" not in st.session_state:
+        st.warning("🔴 Please log in via the sidebar to load live data.")
+        st.markdown("""
+        ### What this terminal does
+        - **Live-ish candlestick charts** (TradingView-style, polled on demand)
+        - **Automatic support & resistance** from swing-high/low clustering
+        - **VCP pattern detection** (Minervini-style scoring)
+        - **EMA 21/50/150/200, RSI, MACD, ATR**
+        - **Breakout alerts** with volume confirmation
+        - **One-click chart** for every stock your scanner finds
+        """)
+    else:
+        st.success("🟢 Connected to IIFL — use the sidebar to scan or explore charts.")
+    if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
+        results = st.session_state["scan_results"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Stocks scanned", len(results))
+        c2.metric("Strong VCP", int((results["Signal"] == "STRONG VCP").sum()))
+        c3.metric("VCP Watch", int((results["Signal"] == "VCP WATCH").sum()))
+        c4.metric("Breakouts", int((results["Breakout"] == "🚨 YES").sum()))
+        st.markdown("### Top 5 setups from last scan")
+        st.dataframe(results.head(5)[["Stock", "Price", "Score", "Signal", "Breakout"]],
+                    use_container_width=True, hide_index=True)
+    else:
+        st.info("No scan results yet — run the **🔍 VCP Scanner** page first.")
+
+# ============================================================
+# PAGE: SCANNER
+# ============================================================
+
+elif page == "🔍 VCP Scanner":
+    st.title("🔍 VCP Scanner")
+
+    if "iifl_user_session" not in st.session_state:
+        st.error("🔴 Please log in via the sidebar first.")
         st.stop()
 
-    scan_limit = min(max_symbols, len(symbols))
-    if len(symbols) > scan_limit:
-        st.warning(
-            f"Scanning the first {scan_limit} of {len(symbols):,} selected symbols. "
-            "Increase 'Maximum stocks to scan' when you are ready for a larger run."
-        )
-        symbols = symbols[:scan_limit]
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        score_filter = st.slider("Minimum VCP Score", 0, 90, 45, step=5)
+        scan_button = st.button("🔍 Run Scan", type="primary")
 
-    results = []
-    progress = st.progress(0)
-    status_text = st.empty()
+    if scan_button:
+        with st.spinner(f"Scanning {len(active_stocks)} stocks..."):
+            st.session_state["scan_results"] = scan_stocks(active_stocks)
 
-    for i, symbol in enumerate(symbols):
-        status_text.write(f"Scanning {symbol} ({i+1}/{len(symbols)})...")
-        result = analyze_symbol(symbol)
-        results.append(result)
-        progress.progress((i + 1) / len(symbols))
-
-    progress.empty()
-    status_text.empty()
-
-    st.session_state["scan_results"] = results
-
-# ============================================================
-# Results
-# ============================================================
-
-results = st.session_state.get("scan_results", [])
-
-if results:
-    public_rows = []
-    for r in results:
-        public_rows.append(
-            {
-                "Symbol": r["Symbol"],
-                "Score": r["Total"],
-                "Technical": r.get("Technical", 0),
-                "Fund": r["Fundamental"],
-                "Trend": r["Trend"],
-                "VCP": r["VCP"],
-                "Breakout": r["Breakout"],
-                "Status": r["Status"],
-                "Setup": r["Setup"],
-                "Pivot": r["Pivot"],
-                "To Pivot %": r["Distance"],
-                "VCP Cnt": r["VCP Count"],
-                "Final C": r["Final Contraction"],
-                "Vol Dry-up %": r["Volume Dry-up"],
-                "Breakout Vol ×": r["Volume Ratio"],
-            }
-        )
-
-    table = pd.DataFrame(public_rows)
-
-    # Sort by total score, then VCP.
-    table = table.sort_values(
-        ["Score", "VCP"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
-
-    st.subheader("🏆 Champion Results")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Stocks scanned", len(table))
-    c2.metric("Above selected score", int((table["Score"] >= min_score).sum()))
-    c3.metric("Trend pass", int((table["Trend"] >= 14).sum()))
-    c4.metric("VCP 3+", int((table["VCP"] >= 16).sum()))
-
-    st.dataframe(
-        table.style.format(
-            {
-                "Score": "{:.0f}",
-                "Technical": "{:.0f}",
-                "Fund": "{:.0f}",
-                "Trend": "{:.0f}",
-                "VCP": "{:.0f}",
-                "Breakout": "{:.0f}",
-                "Pivot": "₹{:,.2f}",
-                "To Pivot %": "{:.2f}%",
-                "Final C": "{:.2f}%",
-                "Vol Dry-up %": "{:.1f}%",
-                "Breakout Vol ×": "{:.2f}x",
-            },
-            na_rep="-",
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    csv = table.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download Scan CSV",
-        data=csv,
-        file_name=f"vcp_champion_scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv",
-    )
-
-    st.divider()
-
-    selectable = table["Symbol"].tolist()
-    selected = st.selectbox("Inspect stock", selectable)
-
-    selected_result = next(
-        (r for r in results if r["Symbol"] == selected),
-        None,
-    )
-
-    if selected_result:
-        r = selected_result
-
-        # Score header.
-        h1, h2, h3, h4, h5, h6 = st.columns(6)
-        if technical_only:
-            h1.metric("Technical Score", f'{r["Total"]}/60')
-        else:
-            h1.metric("Champion Score", f'{r["Total"]}/100')
-        h2.metric("Fundamental", f'{r["Fundamental"]}/40')
-        h3.metric("Trend", f'{r["Trend"]}/20')
-        h4.metric("VCP", f'{r["VCP"]}/30')
-        h5.metric("Breakout", f'{r["Breakout"]}/10')
-        h6.metric("Pivot", f'₹{r.get("Pivot", np.nan):,.2f}')
-
-        st.markdown(
-            f"### {r['Symbol']} — **{r['Status']}** | Setup: **{r['Setup']}**"
-        )
-
-        if r.get("_df") is not None and show_chart:
-            st.plotly_chart(
-                make_chart(
-                    r["_df"],
-                    r.get("Pivot", np.nan),
-                    title=f"{r['Symbol']} — Minervini VCP Chart",
-                ),
-                use_container_width=True,
-            )
-
-        vcp = r.get("_vcp", {})
-        trend = r.get("_trend", {})
-        brk = r.get("_breakout", {})
-
-        a, b, c = st.columns(3)
-
-        with a:
-            st.markdown("#### VCP Structure")
-            st.write(f"Contractions: **{vcp.get('contraction_count', 0)}**")
-            st.write(f"Sequence: **{vcp.get('contractions', [])}**")
-            st.write(f"Strictly decreasing: **{vcp.get('strict_decreasing', False)}**")
-            st.write(f"Final contraction: **{vcp.get('final_contraction', np.nan):.2f}%**")
-            st.write(f"Volume dry-up: **{vcp.get('volume_dryup', np.nan):.1f}%**")
-            st.write(f"Base position: **{vcp.get('base_position', np.nan):.1f}%**")
-
-        with b:
-            st.markdown("#### Pivot / Breakout")
-            st.write(f"Pivot: **₹{r.get('Pivot', np.nan):,.2f}**")
-            st.write(f"Distance: **{r.get('Distance', np.nan):.2f}%**")
-            st.write(f"Breakout: **{brk.get('breakout', False)}**")
-            st.write(f"Volume: **{brk.get('volume_ratio', np.nan):.2f}× 50D avg**")
-            st.write(f"Close strength: **{brk.get('close_strength', np.nan):.1f}%**")
-
-        with c:
-            st.markdown("#### Trend Template")
-            for name, passed in trend.get("checks", {}).items():
-                st.write(("✅ " if passed else "❌ ") + name)
-
-        st.markdown("#### Fundamental score breakdown")
-        fdetails = r.get("_fdetails", {})
-        if fdetails:
-            fd = pd.DataFrame(
-                [{"Condition": k, "Points": v} for k, v in fdetails.items()]
-            )
-            st.dataframe(fd, use_container_width=True, hide_index=True)
-        else:
-            if technical_only:
-                st.info(
-                    "Fundamentals are optional. This scan is running from the NSE universe + IIFL price/volume data. "
-                    "Upload a fundamentals CSV later to activate the /40 Fundamental component."
-                )
-            else:
-                st.info(
-                    "No matching fundamental row was found for this symbol. "
-                    "Check the symbol column in the uploaded CSV."
+    if scan_button:
+        errors = st.session_state.get("scan_errors", [])
+        if errors:
+            st.warning(f"⚠️ {len(errors)} stocks were skipped. Open the diagnostics below.")
+            with st.expander("🔧 Scan diagnostics", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(errors, columns=["Stock", "Reason"]),
+                    use_container_width=True,
+                    hide_index=True
                 )
 
-        if r.get("Error"):
-            st.warning(r["Error"])
+    if "scan_results" in st.session_state and not st.session_state["scan_results"].empty:
+        results = st.session_state["scan_results"]
+        filtered = results[results["Score"] >= score_filter]
+
+        st.success(f"✅ {len(results)} scanned — {len(filtered)} passed filter (score ≥ {score_filter})")
+
+        if filtered.empty:
+            st.warning("No stocks meet the current score threshold.")
+        else:
+            st.markdown("### Results — click 📊 to open the chart")
+            header = st.columns([2, 1.2, 1, 1.4, 1, 1, 1, 1])
+            for h, label in zip(header, ["Stock", "Price", "Score", "Signal", "RSI", "ATR", "Breakout", ""]):
+                h.markdown(f"**{label}**")
+
+            for _, row in filtered.iterrows():
+                c = st.columns([2, 1.2, 1, 1.4, 1, 1, 1, 1])
+                c[0].write(row["Stock"])
+                # FIX: safe access so missing columns cannot crash the page.
+                c[1].write(row.get("Price", "—"))
+                c[2].write(row.get("Score", "—"))
+                c[3].markdown(signal_badge(row.get("Signal", "NO SETUP")), unsafe_allow_html=True)
+                c[4].write(row.get("RSI", "—"))
+                c[5].write(row.get("ATR", "—"))
+                c[6].write(row.get("Breakout", "") or "—")
+                if c[7].button("📊", key=f"chart_btn_{row['Symbol']}"):
+                    st.session_state["chart_symbol"] = row["Symbol"]
+                    st.session_state["page"] = "📈 Chart Explorer"
+                    st.rerun()
+
+            csv = filtered.to_csv(index=False)
+            st.download_button("⬇️ Download CSV", data=csv, file_name="vcp_watchlist.csv", mime="text/csv")
+
+        with st.expander("📋 View all scanned stocks"):
+            st.dataframe(results, use_container_width=True, hide_index=True)
+    else:
+        st.info("Click **🔍 Run Scan** to evaluate your watchlist.")
 
 # ============================================================
-# Methodology
+# PAGE: CHART EXPLORER
 # ============================================================
 
-with st.expander("📚 Scoring methodology", expanded=False):
-    st.markdown("""
-### Two operating modes
+elif page == "📈 Chart Explorer":
+    st.title("📈 Chart Explorer")
 
-**Technical/VCP mode — no Screener file required**
-- Trend Template — 20
-- VCP — 30
-- Breakout — 10
-- Technical score = **60 points**
+    if "iifl_user_session" not in st.session_state:
+        st.error("🔴 Please log in via the sidebar first.")
+        st.stop()
 
-**Full Champion mode — optional fundamentals uploaded**
-- Fundamental Leadership — 40
-- Trend Template — 20
-- VCP — 30
-- Breakout — 10
-- Champion score = **100 points**
+    symbol_choice = st.selectbox(
+        "Symbol",
+        active_stocks,
+        index=active_stocks.index(st.session_state["chart_symbol"])
+        if st.session_state["chart_symbol"] in active_stocks else 0
+    )
+    st.session_state["chart_symbol"] = symbol_choice
 
-### Fundamental component
+    render_symbol_page(symbol_choice)
 
-**Fundamental Leadership — 40**
-- 3Y Sales >20% = 5
-- 3Y Profit >25% = 5
-- Quarterly Sales >20% = 5
-- Quarterly EPS >20% = 5
-- Quarterly Profit >20% = 5
-- ROE >20% = 3
-- ROCE >20% = 3
-- D/E <0.5 = 3
-- Positive CFO = 3
-- Pledge <5% = 3
+# ============================================================
+# FOOTER
+# ============================================================
 
-**Trend Template — 20**
-- Price >50 DMA = 3
-- 50 DMA >200 DMA = 4
-- Rising 200 DMA = 3
-- Price >200 DMA = 2
-- Within 20% of 52W high = 3
-- >30% above 52W low = 2
-- 20 DMA >50 DMA = 2
-- Positive 60-session momentum = 1
-
-**VCP — 30**
-- 3+ contractions
-- C1 > C2 > C3
-- Final contraction ideally <=8–10%
-- Tight price action
-- Volume dry-up
-- Upper-base positioning
-- Developed base
-
-**Breakout — 10**
-- Close > pivot
-- Breakout volume >=1.5× 50D average
-- >=2× receives the strongest volume component
-- Strong close
-- Tight-base breakout bonus
-""")
-
-st.caption(
-    "Screener.in is optional. Automatic mode uses the NSE EQ universe for symbols and your IIFL market-data adapter for historical OHLCV. This scanner is a research/decision-support tool; a high score is not a guarantee of future performance."
-)
+st.markdown("---")
+st.caption("Educational tool only. Not investment advice. Prices are polled on demand, not streamed in real time.")
